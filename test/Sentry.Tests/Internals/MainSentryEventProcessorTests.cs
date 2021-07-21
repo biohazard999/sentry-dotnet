@@ -17,9 +17,8 @@ namespace Sentry.Tests.Internals
         private class Fixture
         {
             public ISentryStackTraceFactory SentryStackTraceFactory { get; set; } = Substitute.For<ISentryStackTraceFactory>();
-            public SentryOptions SentryOptions { get; set; } = new();
-            public Lazy<string> LazyRelease { get; set; } = new(() => "release-123");
-            public MainSentryEventProcessor GetSut() => new(SentryOptions, () => SentryStackTraceFactory, LazyRelease);
+            public SentryOptions SentryOptions { get; set; } = new() {Release = "release-123"};
+            public MainSentryEventProcessor GetSut() => new(SentryOptions, () => SentryStackTraceFactory);
         }
 
         private readonly Fixture _fixture = new();
@@ -240,6 +239,7 @@ namespace Sentry.Tests.Internals
         [InlineData("aBcDe F !@#$ gHi", "aBcDe F !@#$ gHi")] // Provided: nothing will change. (Case check)
         public void Process_NoEnvironmentOnOptions_SameAsEnvironmentVariable(string environment, string expectedEnvironment)
         {
+            _fixture.SentryOptions.Environment = null;
             var sut = _fixture.GetSut();
             var evt = new SentryEvent();
 
@@ -248,6 +248,9 @@ namespace Sentry.Tests.Internals
                 environment,
                 () =>
                 {
+                    // Environment is cached
+                    EnvironmentLocator.Reset();
+
                     _ = sut.Process(evt);
                 });
 
@@ -309,12 +312,51 @@ namespace Sentry.Tests.Internals
         [Fact]
         public void Process_Modules_IsEmpty_WhenSpecified()
         {
+            // Note: this property is obsolete, test is kept for backwards compatibility check
+#pragma warning disable CS0618 // Type or member is obsolete
             _fixture.SentryOptions.ReportAssemblies = false;
+#pragma warning restore CS0618 // Type or member is obsolete
+
             var sut = _fixture.GetSut();
             var evt = new SentryEvent();
             _ = sut.Process(evt);
 
             Assert.Empty(evt.Modules);
+        }
+
+        [Fact]
+        public void Process_Modules_ReportAssembliesMode_None()
+        {
+            _fixture.SentryOptions.ReportAssembliesMode = ReportAssembliesMode.None;
+            var sut = _fixture.GetSut();
+            var evt = new SentryEvent();
+            _ = sut.Process(evt);
+
+            Assert.Empty(evt.Modules);
+        }
+
+        [Fact]
+        public void Process_Modules_ReportAssembliesMode_Version()
+        {
+            _fixture.SentryOptions.ReportAssembliesMode = ReportAssembliesMode.Version;
+            var sut = _fixture.GetSut();
+            var evt = new SentryEvent();
+            _ = sut.Process(evt);
+
+            // Don't allow any assembly with a + (sha commit is added to informational version)
+            Assert.DoesNotContain(evt.Modules, x => x.Value.Contains("+"));
+        }
+
+        [Fact]
+        public void Process_Modules_ReportAssembliesMode_InformationalVersion()
+        {
+            _fixture.SentryOptions.ReportAssembliesMode = ReportAssembliesMode.InformationalVersion;
+            var sut = _fixture.GetSut();
+            var evt = new SentryEvent();
+            _ = sut.Process(evt);
+
+            // Ensure at least 1 assembly with a + (sha commit is added to informational version)
+            Assert.Contains(evt.Modules, x => x.Value.Contains("+"));
         }
 
         [Fact]

@@ -18,6 +18,7 @@ namespace Sentry.Protocol.Envelopes
         private const string TypeValueEvent = "event";
         private const string TypeValueUserReport = "user_report";
         private const string TypeValueTransaction = "transaction";
+        private const string TypeValueSession = "session";
         private const string TypeValueAttachment = "attachment";
         private const string LengthKey = "length";
         private const string FileNameKey = "filename";
@@ -98,6 +99,9 @@ namespace Sentry.Protocol.Envelopes
             // Length is NOT known (need to calculate)
             else
             {
+#if !NET461 && !NETSTANDARD2_0
+                await
+#endif
                 using var payloadBuffer = await BufferPayloadAsync(cancellationToken).ConfigureAwait(false);
 
                 // Header
@@ -120,7 +124,7 @@ namespace Sentry.Protocol.Envelopes
         /// </summary>
         public static EnvelopeItem FromEvent(SentryEvent @event)
         {
-            var header = new Dictionary<string, object?>(StringComparer.Ordinal)
+            var header = new Dictionary<string, object?>(1, StringComparer.Ordinal)
             {
                 [TypeKey] = TypeValueEvent
             };
@@ -133,7 +137,7 @@ namespace Sentry.Protocol.Envelopes
         /// </summary>
         public static EnvelopeItem FromUserFeedback(UserFeedback sentryUserFeedback)
         {
-            var header = new Dictionary<string, object?>(StringComparer.Ordinal)
+            var header = new Dictionary<string, object?>(1, StringComparer.Ordinal)
             {
                 [TypeKey] = TypeValueUserReport
             };
@@ -146,12 +150,25 @@ namespace Sentry.Protocol.Envelopes
         /// </summary>
         public static EnvelopeItem FromTransaction(Transaction transaction)
         {
-            var header = new Dictionary<string, object?>(StringComparer.Ordinal)
+            var header = new Dictionary<string, object?>(1, StringComparer.Ordinal)
             {
                 [TypeKey] = TypeValueTransaction
             };
 
-            return new EnvelopeItem(header, new JsonSerializable((IJsonSerializable)transaction));
+            return new EnvelopeItem(header, new JsonSerializable(transaction));
+        }
+
+        /// <summary>
+        /// Creates an envelope item from a session update.
+        /// </summary>
+        public static EnvelopeItem FromSession(SessionUpdate sessionUpdate)
+        {
+            var header = new Dictionary<string, object?>(1, StringComparer.Ordinal)
+            {
+                [TypeKey] = TypeValueSession
+            };
+
+            return new EnvelopeItem(header, new JsonSerializable(sessionUpdate));
         }
 
         /// <summary>
@@ -170,7 +187,7 @@ namespace Sentry.Protocol.Envelopes
                 _ => "event.attachment"
             };
 
-            var header = new Dictionary<string, object?>(StringComparer.Ordinal)
+            var header = new Dictionary<string, object?>(5, StringComparer.Ordinal)
             {
                 [TypeKey] = TypeValueAttachment,
                 [LengthKey] = stream.TryGetLength(),
@@ -202,7 +219,7 @@ namespace Sentry.Protocol.Envelopes
             }
 
             return
-                Json.Parse(buffer.ToArray()).GetObjectDictionary()
+                Json.Parse(buffer.ToArray()).GetDictionaryOrNull()
                 ?? throw new InvalidOperationException("Envelope item header is malformed.");
         }
 
@@ -249,10 +266,20 @@ namespace Sentry.Protocol.Envelopes
                 return new JsonSerializable(Transaction.FromJson(json));
             }
 
+            // Session
+            if (string.Equals(payloadType, TypeValueSession, StringComparison.OrdinalIgnoreCase))
+            {
+                var bufferLength = (int)(payloadLength ?? stream.Length);
+                var buffer = await stream.ReadByteChunkAsync(bufferLength, cancellationToken).ConfigureAwait(false);
+                var json = Json.Parse(buffer);
+
+                return new JsonSerializable(SessionUpdate.FromJson(json));
+            }
+
             // Arbitrary payload
             var payloadStream = new PartialStream(stream, stream.Position, payloadLength);
 
-            if (payloadLength != null)
+            if (payloadLength is not null)
             {
                 stream.Seek(payloadLength.Value, SeekOrigin.Current);
             }

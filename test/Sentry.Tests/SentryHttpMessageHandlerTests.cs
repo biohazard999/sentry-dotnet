@@ -1,4 +1,6 @@
-﻿using System.Linq;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -71,7 +73,7 @@ namespace Sentry.Tests
             var hub = Substitute.For<IHub>();
 
             var transaction = new TransactionTracer(
-                Substitute.For<IHub>(),
+                hub,
                 "foo",
                 "bar"
             );
@@ -91,6 +93,76 @@ namespace Sentry.Tests
                 span.Description == "GET https://example.com/" &&
                 span.IsFinished
             );
+        }
+
+        [Fact]
+        public async Task SendAsync_ExceptionThrown_ExceptionLinkedToSpan()
+        {
+            // Arrange
+            var hub = Substitute.For<IHub>();
+
+            var transaction = new TransactionTracer(
+                hub,
+                "foo",
+                "bar"
+            );
+
+            hub.GetSpan().ReturnsForAnyArgs(transaction);
+
+            var exception = new Exception();
+
+            using var innerHandler = new FakeHttpMessageHandler(() => throw exception);
+            using var sentryHandler = new SentryHttpMessageHandler(innerHandler, hub);
+            using var client = new HttpClient(sentryHandler);
+
+            // Act
+            await Assert.ThrowsAsync<Exception>(() => client.GetAsync("https://example.com/"));
+
+            // Assert
+            hub.Received(1).BindException(exception, Arg.Any<ISpan>()); // second argument is an implicitly created span
+        }
+
+        [Fact]
+        public async Task SendAsync_Executed_BreadcrumbCreated()
+        {
+            // Arrange
+            var scope = new Scope();
+            var hub = Substitute.For<IHub>();
+                hub.When(h => h.ConfigureScope(Arg.Any<Action<Scope>>()))
+                   .Do(c => c.Arg<Action<Scope>>()(scope));
+
+            var url = "https://example.com/";
+
+            var urlKey = "url";
+            var methodKey = "method";
+            var statusKey = "status_code";
+            var expectedBreadcrumbData = new Dictionary<string, string>
+                {
+                    { urlKey, url },
+                    { methodKey, "GET" },
+                    { statusKey, "200" }
+                };
+            var expectedType = "http";
+            var expectedCategory = "http";
+            using var sentryHandler = new SentryHttpMessageHandler(hub);
+            using var client = new HttpClient(sentryHandler);
+
+            // Act
+            await client.GetAsync(url);
+            var BreadcrumbGenerated = scope.Breadcrumbs.First();
+
+            // Assert
+            Assert.Equal(expectedType, BreadcrumbGenerated.Type);
+            Assert.Equal(expectedCategory, BreadcrumbGenerated.Category);
+
+            Assert.True(BreadcrumbGenerated.Data.ContainsKey(urlKey));
+            Assert.Equal(expectedBreadcrumbData[urlKey], BreadcrumbGenerated.Data[urlKey]);
+
+            Assert.True(BreadcrumbGenerated.Data.ContainsKey(methodKey));
+            Assert.Equal(expectedBreadcrumbData[methodKey], BreadcrumbGenerated.Data[methodKey]);
+
+            Assert.True(BreadcrumbGenerated.Data.ContainsKey(statusKey));
+            Assert.Equal(expectedBreadcrumbData[statusKey], BreadcrumbGenerated.Data[statusKey]);
         }
     }
 }

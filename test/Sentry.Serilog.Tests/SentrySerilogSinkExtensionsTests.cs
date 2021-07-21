@@ -88,7 +88,9 @@ namespace Sentry.Serilog.Tests
             // Compare individual properties
             Assert.Equal(_fixture.SendDefaultPii, sut.SendDefaultPii);
             Assert.Equal(_fixture.DecompressionMethods, sut.DecompressionMethods);
+#pragma warning disable CS0618 // Type or member is obsolete
             Assert.Equal(_fixture.ReportAssemblies, sut.ReportAssemblies);
+#pragma warning restore CS0618 // Type or member is obsolete
             Assert.Equal(_fixture.SampleRate, sut.SampleRate);
         }
 
@@ -98,7 +100,7 @@ namespace Sentry.Serilog.Tests
             var sut = _fixture.GetSut();
 
             SentrySinkExtensions.ConfigureSentrySerilogOptions(sut, _fixture.Dsn, _fixture.MinimumEventLevel,
-                _fixture.MinimumBreadcrumbLevel, null,_fixture.SendDefaultPii,
+                _fixture.MinimumBreadcrumbLevel, null, null, _fixture.SendDefaultPii,
                 _fixture.IsEnvironmentUser, _fixture.ServerName, _fixture.AttachStackTrace, _fixture.MaxBreadcrumbs,
                 _fixture.SampleRate, _fixture.Release, _fixture.Environment,  _fixture.MaxQueueItems,
                 _fixture.ShutdownTimeout, _fixture.DecompressionMethods, _fixture.RequestBodyCompressionLevel,
@@ -125,7 +127,9 @@ namespace Sentry.Serilog.Tests
             Assert.Equal(_fixture.RequestBodyCompressionBuffered, sut.RequestBodyCompressionBuffered);
             Assert.Equal(_fixture.Debug, sut.Debug);
             Assert.Equal(_fixture.DiagnosticLevel, sut.DiagnosticLevel);
+#pragma warning disable CS0618 // Type or member is obsolete
             Assert.Equal(_fixture.ReportAssemblies, sut.ReportAssemblies);
+#pragma warning restore CS0618 // Type or member is obsolete
             Assert.Equal(_fixture.DeduplicateMode, sut.DeduplicateMode);
             Assert.Equal(_fixture.InitializeSdk, sut.InitializeSdk);
             Assert.Equal(_fixture.MinimumEventLevel, sut.MinimumEventLevel);

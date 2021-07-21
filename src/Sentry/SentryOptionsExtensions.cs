@@ -1,13 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Sentry.Extensibility;
 using Sentry.Infrastructure;
 using Sentry.Integrations;
 using Sentry.Internal;
-#if NETFX
+using Sentry.Internal.Extensions;
+#if NET461
 using Sentry.PlatformAbstractions;
 #endif
 
@@ -46,7 +48,7 @@ namespace Sentry
         public static void DisableTaskUnobservedTaskExceptionCapture(this SentryOptions options) =>
             options.RemoveIntegration<TaskUnobservedTaskExceptionIntegration>();
 
-#if NETFX
+#if NET461
         /// <summary>
         /// Disables the list addition of .Net Frameworks into events.
         /// </summary>
@@ -235,6 +237,29 @@ namespace Sentry
             {
                 options.DiagnosticLogger = null;
             }
+        }
+
+        internal static string? TryGetDsnSpecificCacheDirectoryPath(this SentryOptions options)
+        {
+            if (string.IsNullOrWhiteSpace(options.CacheDirectoryPath))
+            {
+                return null;
+            }
+
+            // DSN must be set to use caching
+            var dsn = options.Dsn;
+            if (string.IsNullOrWhiteSpace(dsn))
+            {
+                return null;
+            }
+
+            return Path.Combine(options.CacheDirectoryPath, "Sentry", dsn.GetHashString());
+        }
+
+        internal static string? TryGetProcessSpecificCacheDirectoryPath(this SentryOptions options)
+        {
+            // In the future, this will most likely contain process ID
+            return options.TryGetDsnSpecificCacheDirectoryPath();
         }
     }
 }

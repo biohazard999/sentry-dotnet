@@ -4,7 +4,165 @@
 
 ### Fixes
 
+- Don't cancel cache flushing on init ([#1139](https://github.com/getsentry/sentry-dotnet/pull/1139))
+
+## 3.8.2
+
+### Fixes
+
+- Add IsParentSampled to ITransactionContext ([#1128](https://github.com/getsentry/sentry-dotnet/pull/1128)
+- Avoid warn in global mode ([#1132](https://github.com/getsentry/sentry-dotnet/pull/1132))
+- Fix `ParentSampledId` being reset on `Transaction` ([#1130](https://github.com/getsentry/sentry-dotnet/pull/1130))
+
+## 3.8.1
+
+### Fixes
+
+- Persisted Sessions logging ([#1125](https://github.com/getsentry/sentry-dotnet/pull/1125))
+- Don't log an error when attempting to recover a persisted session but none exists ([#1123](https://github.com/getsentry/sentry-dotnet/pull/1123))
+
+### Features
+
+- Introduce scope stack abstraction to support global scope on desktop and mobile applications and `HttpContext`-backed scoped on legacy ASP.NET ([#1124](https://github.com/getsentry/sentry-dotnet/pull/1124))
+
+## 3.8.0
+
+### Fixes
+
+- ASP.NET Core: fix handled not being set for Handled exceptions ([#1111](https://github.com/getsentry/sentry-dotnet/pull/1111))
+
+### Features
+
+- File system persistence for sessions ([#1105](https://github.com/getsentry/sentry-dotnet/pull/1105))
+
+## 3.7.0
+
+### Features
+
+- Add HTTP request breadcrumb ([#1113](https://github.com/getsentry/sentry-dotnet/pull/1113))
+- Integration for Google Cloud Functions ([#1085](https://github.com/getsentry/sentry-dotnet/pull/1085)) 
+- Add ClearAttachments to Scope ([#1104](https://github.com/getsentry/sentry-dotnet/pull/1104))
+- Add additional logging and additional fallback for installation ID ([#1103](https://github.com/getsentry/sentry-dotnet/pull/1103))
+
+### Fixes
+
+- Avoid Unhandled Exception on .NET 461 if the Registry Access threw an exception ([#1101](https://github.com/getsentry/sentry-dotnet/pull/1101))
+
+## 3.6.1
+
+### Fixes
+
+- `IHub.ResumeSession()`: don't start a new session if pause wasn't called or if there is no active session ([#1089](https://github.com/getsentry/sentry-dotnet/pull/1089))
+- Fixed incorrect order when getting the last active span ([#1094](https://github.com/getsentry/sentry-dotnet/pull/1094))
+- Fix logger call in BackgroundWorker that caused a formatting exception in runtime ([#1092](https://github.com/getsentry/sentry-dotnet/pull/1092))
+
+## 3.6.0
+
+### Features
+
+- Implement pause & resume session ([#1069](https://github.com/getsentry/sentry-dotnet/pull/1069))
+- Add auto session tracking ([#1068](https://github.com/getsentry/sentry-dotnet/pull/1068))
+- Add SDK information to envelope ([#1084](https://github.com/getsentry/sentry-dotnet/pull/1084))
+- Add ReportAssembliesMode in favor of ReportAssemblies ([#1079](https://github.com/getsentry/sentry-dotnet/pull/1079))
+
+### Fixes
+
+- System.Text.Json 5.0.2 ([#1078](https://github.com/getsentry/sentry-dotnet/pull/1078))
+
+## 3.6.0-alpha.2
+
+### Features
+
+- Extended Device and GPU protocol; public IJsonSerializable ([#1063](https://github.com/getsentry/sentry-dotnet/pull/1063))
+- ASP.NET Core: Option `AdjustStandardEnvironmentNameCasing` to opt-out from lower casing env name. [#1057](https://github.com/getsentry/sentry-dotnet/pull/1057)
+- Sessions: Improve exception check in `CaptureEvent(...)` for the purpose of reporting errors in session ([#1058](https://github.com/getsentry/sentry-dotnet/pull/1058))
+- Introduce TraceDiagnosticLogger and obsolete DebugDiagnosticLogger ([#1048](https://github.com/getsentry/sentry-dotnet/pull/1048))
+
+### Fixes
+
+- Handle error thrown while trying to get `BootTime` on PS4 with IL2CPP ([#1062](https://github.com/getsentry/sentry-dotnet/pull/1062))
+- Use SentryId for ISession.Id ([#1052](https://github.com/getsentry/sentry-dotnet/pull/1052))
+- Add System.Reflection.Metadata as a dependency for netcoreapp3.0 target([#1064](https://github.com/getsentry/sentry-dotnet/pull/1064))
+
+## 3.6.0-alpha.1
+
+### Features
+
+- Implemented client-mode release health ([#1013](https://github.com/getsentry/sentry-dotnet/pull/1013))
+
+### Fixes
+
+- Report lowercase staging environment for ASP.NET Core ([#1046](https://github.com/getsentry/sentry-unity/pull/1046))
+
+## 3.5.0
+
+### Features
+
+- Report user IP address for ASP.NET Core ([#1045](https://github.com/getsentry/sentry-unity/pull/1045))
+
+### Fixes
+
+- Connect middleware exceptions to transactions ([#1043](https://github.com/getsentry/sentry-dotnet/pull/1043))
+- Hub.IsEnabled set to false when Hub disposed ([#1021](https://github.com/getsentry/sentry-dotnet/pull/1021))
+
+## 3.4.0
+
+### Features
+
+- Sentry.EntityFramework moved to this repository ([#1017](https://github.com/getsentry/sentry-dotnet/pull/1017))
+- Additional `netstandard2.1` target added. Sample with .NET Core 3.1 console app.
+- `UseBreadcrumbs` is called automatically by `AddEntityFramework`
+
+### Fixes
+
+- Normalize line breaks ([#1016](https://github.com/getsentry/sentry-dotnet/pull/1016))
+- Finish span with exception in SentryHttpMessageHandler ([#1037](https://github.com/getsentry/sentry-dotnet/pull/1037))
+
+## 3.4.0-beta.0
+
+### Features
+
+- Serilog: Add support for Serilog.Formatting.ITextFormatter ([#998](https://github.com/getsentry/sentry-dotnet/pull/998))
+- simplify ifdef ([#1010](https://github.com/getsentry/sentry-dotnet/pull/1010))
+- Use `DebugDiagnosticLogger` as the default logger for legacy ASP.NET ([#1012](https://github.com/getsentry/sentry-dotnet/pull/1012))
+- Adjust parameter type in `AddBreadcrumb` to use `IReadOnlyDictionary<...>` instead of `Dictionary<...>` ([#1000](https://github.com/getsentry/sentry-dotnet/pull/1000))
+- await dispose everywhere ([#1009](https://github.com/getsentry/sentry-dotnet/pull/1009))
+- Further simplify transaction integration from legacy ASP.NET ([#1011](https://github.com/getsentry/sentry-dotnet/pull/1011))
+
+## 3.3.5-beta.0
+
+### Features
+
+- Default environment to "debug" if running with debugger attached (#978)
+- ASP.NET Classic: `HttpContext.StartSentryTransaction()` extension method (#996)
+
+### Fixes
+
+- Unity can have negative line numbers ([#994](https://github.com/getsentry/sentry-dotnet/pull/994))
+- Fixed an issue where an attempt to deserialize `Device` with a non-system time zone failed ([#993](https://github.com/getsentry/sentry-dotnet/pull/993))
+
+## 3.3.4
+
+### Features
+
+- Env var to keep large envelopes if they are rejected by Sentry (#957)
+
+### Fixes
+
+- serialize parent_span_id in contexts.trace (#958)
+
+## 3.3.3
+
+### Fixes
+
+- boot time detection can fail in some cases (#955)
+
+## 3.3.2
+
+### Fixes
+
 - Don't override Span/Transaction status on Finish(...) if status was not provided explicitly (#928) @Tyrrrz
+- Fix startup time shows incorrect value on macOS/Linux. Opt-out available for IL2CPP. (#948)
 
 ## 3.3.1
 

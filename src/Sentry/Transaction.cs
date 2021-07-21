@@ -32,7 +32,11 @@ namespace Sentry
         // transaction as the parent.
 
         /// <inheritdoc />
-        public SpanId? ParentSpanId { get; private set; }
+        public SpanId? ParentSpanId
+        {
+            get => Contexts.Trace.ParentSpanId;
+            private set => Contexts.Trace.ParentSpanId = value;
+        }
 
         /// <inheritdoc />
         public SentryId TraceId
@@ -43,6 +47,9 @@ namespace Sentry
 
         /// <inheritdoc />
         public string Name { get; private set; }
+
+        /// <inheritdoc />
+        public bool? IsParentSampled { get; set; }
 
         /// <inheritdoc />
         public string? Platform { get; set; } = Constants.Platform;
@@ -193,11 +200,15 @@ namespace Sentry
         /// Initializes an instance of <see cref="Transaction"/>.
         /// </summary>
         public Transaction(ITransaction tracer)
-            : this(tracer.Name, tracer.Operation)
+            : this(tracer.Name)
         {
+            // Contexts have to be set first because other fields use that
+            Contexts = tracer.Contexts;
+
             ParentSpanId = tracer.ParentSpanId;
             SpanId = tracer.SpanId;
             TraceId = tracer.TraceId;
+            Operation = tracer.Operation;
             Platform = tracer.Platform;
             Release = tracer.Release;
             StartTimestamp = tracer.StartTimestamp;
@@ -207,7 +218,6 @@ namespace Sentry
             IsSampled = tracer.IsSampled;
             Level = tracer.Level;
             Request = tracer.Request;
-            Contexts = tracer.Contexts;
             User = tracer.User;
             Environment = tracer.Environment;
             Sdk = tracer.Sdk;
@@ -248,120 +258,22 @@ namespace Sentry
 
             writer.WriteString("type", "transaction");
             writer.WriteSerializable("event_id", EventId);
-
-            if (ParentSpanId is { } parentSpanId)
-            {
-                writer.WriteString("parent_span_id", parentSpanId);
-            }
-
-            if (Level is {} level)
-            {
-                writer.WriteString("level", level.ToString().ToLowerInvariant());
-            }
-
-            if (!string.IsNullOrWhiteSpace(Platform))
-            {
-                writer.WriteString("platform", Platform);
-            }
-
-            if (!string.IsNullOrWhiteSpace(Release))
-            {
-                writer.WriteString("release", Release);
-            }
-
-            if (!string.IsNullOrWhiteSpace(Name))
-            {
-                writer.WriteString("transaction", Name);
-            }
-
+            writer.WriteStringIfNotWhiteSpace("level", Level?.ToString().ToLowerInvariant());
+            writer.WriteStringIfNotWhiteSpace("platform", Platform);
+            writer.WriteStringIfNotWhiteSpace("release", Release);
+            writer.WriteStringIfNotWhiteSpace("transaction", Name);
             writer.WriteString("start_timestamp", StartTimestamp);
-
-            if (EndTimestamp is {} endTimestamp)
-            {
-                writer.WriteString("timestamp", endTimestamp);
-            }
-
-            if (_request is {} request)
-            {
-                writer.WriteSerializable("request", request);
-            }
-
-            if (_contexts is {} contexts)
-            {
-                writer.WriteSerializable("contexts", contexts);
-            }
-
-            if (_user is {} user)
-            {
-                writer.WriteSerializable("user", user);
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment))
-            {
-                writer.WriteString("environment", Environment);
-            }
-
+            writer.WriteStringIfNotNull("timestamp", EndTimestamp);
+            writer.WriteSerializableIfNotNull("request", _request);
+            writer.WriteSerializableIfNotNull("contexts", _contexts);
+            writer.WriteSerializableIfNotNull("user", _user);
+            writer.WriteStringIfNotWhiteSpace("environment", Environment);
             writer.WriteSerializable("sdk", Sdk);
-
-            if (_fingerprint is {} fingerprint && fingerprint.Any())
-            {
-                writer.WriteStartArray("fingerprint");
-
-                foreach (var i in fingerprint)
-                {
-                    writer.WriteStringValue(i);
-                }
-
-                writer.WriteEndArray();
-            }
-
-            if (_breadcrumbs.Any())
-            {
-                writer.WriteStartArray("breadcrumbs");
-
-                foreach (var i in _breadcrumbs)
-                {
-                    writer.WriteSerializableValue(i);
-                }
-
-                writer.WriteEndArray();
-            }
-
-            if (_extra.Any())
-            {
-                writer.WriteStartObject("extra");
-
-                foreach (var (key, value) in _extra)
-                {
-                    writer.WriteDynamic(key, value);
-                }
-
-                writer.WriteEndObject();
-            }
-
-            if (_tags.Any())
-            {
-                writer.WriteStartObject("tags");
-
-                foreach (var (key, value) in _tags)
-                {
-                    writer.WriteString(key, value);
-                }
-
-                writer.WriteEndObject();
-            }
-
-            if (_spans.Any())
-            {
-                writer.WriteStartArray("spans");
-
-                foreach (var span in _spans)
-                {
-                    writer.WriteSerializableValue(span);
-                }
-
-                writer.WriteEndArray();
-            }
+            writer.WriteStringArrayIfNotEmpty("fingerprint", _fingerprint);
+            writer.WriteArrayIfNotEmpty("breadcrumbs", _breadcrumbs);
+            writer.WriteDictionaryIfNotEmpty("extra", _extra);
+            writer.WriteStringDictionaryIfNotEmpty("tags", _tags!);
+            writer.WriteArrayIfNotEmpty("spans", _spans);
 
             writer.WriteEndObject();
         }
@@ -372,11 +284,10 @@ namespace Sentry
         public static Transaction FromJson(JsonElement json)
         {
             var eventId = json.GetPropertyOrNull("event_id")?.Pipe(SentryId.FromJson) ?? SentryId.Empty;
-            var parentSpanId = json.GetPropertyOrNull("parent_span_id")?.Pipe(SpanId.FromJson);
             var name = json.GetProperty("transaction").GetStringOrThrow();
             var startTimestamp = json.GetProperty("start_timestamp").GetDateTimeOffset();
             var endTimestamp = json.GetPropertyOrNull("timestamp")?.GetDateTimeOffset();
-            var level = json.GetPropertyOrNull("level")?.GetString()?.Pipe(s => s.ParseEnum<SentryLevel>());
+            var level = json.GetPropertyOrNull("level")?.GetString()?.ParseEnum<SentryLevel>();
             var platform = json.GetPropertyOrNull("platform")?.GetString();
             var release = json.GetPropertyOrNull("release")?.GetString();
             var request = json.GetPropertyOrNull("request")?.Pipe(Request.FromJson);
@@ -388,15 +299,14 @@ namespace Sentry
                 .ToArray();
             var breadcrumbs = json.GetPropertyOrNull("breadcrumbs")?.EnumerateArray().Select(Breadcrumb.FromJson)
                 .Pipe(v => new List<Breadcrumb>(v));
-            var extra = json.GetPropertyOrNull("extra")?.GetObjectDictionary()
+            var extra = json.GetPropertyOrNull("extra")?.GetDictionaryOrNull()
                 ?.ToDictionary();
-            var tags = json.GetPropertyOrNull("tags")?.GetDictionary()
+            var tags = json.GetPropertyOrNull("tags")?.GetStringDictionaryOrNull()
                 ?.ToDictionary();
 
             var transaction = new Transaction(name)
             {
                 EventId = eventId,
-                ParentSpanId = parentSpanId,
                 StartTimestamp = startTimestamp,
                 EndTimestamp = endTimestamp,
                 Level = level,

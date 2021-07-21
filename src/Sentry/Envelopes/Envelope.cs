@@ -44,7 +44,7 @@ namespace Sentry.Protocol.Envelopes
             value is string valueString &&
             Guid.TryParse(valueString, out var guid)
                 ? new SentryId(guid)
-                : (SentryId?)null;
+                : null;
 
         private async Task SerializeHeaderAsync(Stream stream, CancellationToken cancellationToken = default)
         {
@@ -71,15 +71,35 @@ namespace Sentry.Protocol.Envelopes
         /// <inheritdoc />
         public void Dispose() => Items.DisposeAll();
 
+        private static Dictionary<string, object?> CreateHeader(SentryId? eventId = null)
+        {
+            var header = new Dictionary<string, object?>(2, StringComparer.Ordinal)
+            {
+                // Include limited SDK information (no packages)
+                ["sdk"] = new Dictionary<string, string?>(2, StringComparer.Ordinal)
+                {
+                    ["name"] = SdkVersion.Instance.Name,
+                    ["version"] = SdkVersion.Instance.Version
+                }
+            };
+
+            if (eventId is not null)
+            {
+                header[EventIdKey] = eventId.Value.ToString();
+            }
+
+            return header;
+        }
+
         /// <summary>
         /// Creates an envelope that contains a single event.
         /// </summary>
-        public static Envelope FromEvent(SentryEvent @event, IReadOnlyCollection<Attachment>? attachments = null)
+        public static Envelope FromEvent(
+            SentryEvent @event,
+            IReadOnlyCollection<Attachment>? attachments = null,
+            SessionUpdate? sessionUpdate = null)
         {
-            var header = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                [EventIdKey] = @event.EventId.ToString()
-            };
+            var header = CreateHeader(@event.EventId);
 
             var items = new List<EnvelopeItem>
             {
@@ -91,6 +111,11 @@ namespace Sentry.Protocol.Envelopes
                 items.AddRange(attachments.Select(EnvelopeItem.FromAttachment));
             }
 
+            if (sessionUpdate is not null)
+            {
+                items.Add(EnvelopeItem.FromSession(sessionUpdate));
+            }
+
             return new Envelope(header, items);
         }
 
@@ -99,10 +124,7 @@ namespace Sentry.Protocol.Envelopes
         /// </summary>
         public static Envelope FromUserFeedback(UserFeedback sentryUserFeedback)
         {
-            var header = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                [EventIdKey] = sentryUserFeedback.EventId.ToString()
-            };
+            var header = CreateHeader(sentryUserFeedback.EventId);
 
             var items = new[]
             {
@@ -117,14 +139,26 @@ namespace Sentry.Protocol.Envelopes
         /// </summary>
         public static Envelope FromTransaction(Transaction transaction)
         {
-            var header = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                [EventIdKey] = transaction.EventId.ToString()
-            };
+            var header = CreateHeader(transaction.EventId);
 
             var items = new[]
             {
                 EnvelopeItem.FromTransaction(transaction)
+            };
+
+            return new Envelope(header, items);
+        }
+
+        /// <summary>
+        /// Creates an envelope that contains a session update.
+        /// </summary>
+        public static Envelope FromSession(SessionUpdate sessionUpdate)
+        {
+            var header = CreateHeader();
+
+            var items = new[]
+            {
+                EnvelopeItem.FromSession(sessionUpdate)
             };
 
             return new Envelope(header, items);
@@ -150,7 +184,7 @@ namespace Sentry.Protocol.Envelopes
             }
 
             return
-                Json.Parse(buffer.ToArray()).GetObjectDictionary()
+                Json.Parse(buffer.ToArray()).GetDictionaryOrNull()
                 ?? throw new InvalidOperationException("Envelope header is malformed.");
         }
 

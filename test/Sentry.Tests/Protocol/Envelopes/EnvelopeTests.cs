@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Sentry.Protocol;
@@ -38,6 +39,9 @@ namespace Sentry.Tests.Protocol.Envelopes
         public async Task Deserialization_EnvelopeWithoutItems_Success()
         {
             // Arrange
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var input = "{\"event_id\":\"12c2d058d58442709aa2eca08bf20986\"}\n".ToMemoryStream();
 
             using var expectedEnvelope = new Envelope(
@@ -83,9 +87,12 @@ namespace Sentry.Tests.Protocol.Envelopes
         public async Task Deserialization_EnvelopeWithoutHeader_Success()
         {
             // Arrange
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var input = (
                 "{}\n" +
-                "{\"type\":\"session\",\"length\":75}\n" +
+                "{\"type\":\"fake\",\"length\":75}\n" +
                 "{\"started\": \"2020-02-07T14:16:00Z\",\"attrs\":{\"release\":\"sentry-test@1.0.0\"}}\n"
             ).ToMemoryStream();
 
@@ -94,7 +101,7 @@ namespace Sentry.Tests.Protocol.Envelopes
                 new[]
                 {
                     new EnvelopeItem(
-                        new Dictionary<string, object>{["type"] = "session", ["length"] = 75L},
+                        new Dictionary<string, object>{["type"] = "fake", ["length"] = 75L},
                         new StreamSerializable("{\"started\": \"2020-02-07T14:16:00Z\",\"attrs\":{\"release\":\"sentry-test@1.0.0\"}}"
                             .ToMemoryStream())
                     )
@@ -161,6 +168,9 @@ namespace Sentry.Tests.Protocol.Envelopes
         public async Task Deserialization_EnvelopeWithTwoItems_Success()
         {
             // Arrange
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var input = (
                 "{\"event_id\":\"9ec79c33ec9942ab8353589fcb2e04dc\",\"dsn\":\"https://e12d836b15bb49d7bbf99e64295d995b:@sentry.io/42\"}\n" +
                 "{\"type\":\"attachment\",\"length\":13,\"content_type\":\"text/plain\",\"filename\":\"hello.txt\"}\n" +
@@ -253,6 +263,9 @@ namespace Sentry.Tests.Protocol.Envelopes
         public async Task Deserialization_EnvelopeWithTwoEmptyItems_Success()
         {
             // Arrange
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var input = (
                 "{\"event_id\":\"9ec79c33ec9942ab8353589fcb2e04dc\"}\n" +
                 "{\"type\":\"attachment\",\"length\":0}\n" +
@@ -322,6 +335,9 @@ namespace Sentry.Tests.Protocol.Envelopes
         public async Task Deserialization_EnvelopeWithItemWithoutLength_Success()
         {
             // Arrange
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var input = (
                 "{\"event_id\":\"9ec79c33ec9942ab8353589fcb2e04dc\"}\n" +
                 "{\"type\":\"attachment\"}\n" +
@@ -381,6 +397,9 @@ namespace Sentry.Tests.Protocol.Envelopes
 
             using var envelope = Envelope.FromEvent(@event);
 
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var stream = new MemoryStream();
 
             // Act
@@ -419,6 +438,9 @@ namespace Sentry.Tests.Protocol.Envelopes
 
             using var envelope = Envelope.FromEvent(@event, new[] {attachment});
 
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var stream = new MemoryStream();
 
             // Act
@@ -437,6 +459,50 @@ namespace Sentry.Tests.Protocol.Envelopes
         }
 
         [Fact]
+        public async Task Roundtrip_WithEvent_WithSession_Success()
+        {
+            // Arrange
+            var @event = new SentryEvent
+            {
+                Message = "Test",
+                Sdk = new SdkVersion {Name = "SDK-test", Version = "1.0.0"}
+            };
+
+            var attachment = new Attachment(
+                AttachmentType.Default,
+                new StreamAttachmentContent(Stream.Null),
+                "file.txt",
+                null
+            );
+
+            var sessionUpdate = new Session("foo", "bar", "baz").CreateUpdate(false, DateTimeOffset.Now);
+
+            using var envelope = Envelope.FromEvent(@event, new[] {attachment}, sessionUpdate);
+
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
+                using var stream = new MemoryStream();
+
+            // Act
+            await envelope.SerializeAsync(stream);
+            stream.Seek(0, SeekOrigin.Begin);
+
+            using var envelopeRoundtrip = await Envelope.DeserializeAsync(stream);
+
+            // Assert
+            envelopeRoundtrip.Items.Should().HaveCount(3);
+
+            envelopeRoundtrip.Items[0].Payload.Should().BeOfType<JsonSerializable>()
+                .Which.Source.Should().BeEquivalentTo(@event);
+
+            envelopeRoundtrip.Items[1].Payload.Should().BeOfType<StreamSerializable>();
+
+            envelopeRoundtrip.Items[2].Payload.Should().BeOfType<JsonSerializable>()
+                .Which.Source.Should().BeEquivalentTo(sessionUpdate);
+        }
+
+        [Fact]
         public async Task Roundtrip_WithUserFeedback_Success()
         {
             // Arrange
@@ -449,6 +515,9 @@ namespace Sentry.Tests.Protocol.Envelopes
 
             using var envelope = Envelope.FromUserFeedback(feedback);
 
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var stream = new MemoryStream();
 
             // Act
@@ -463,15 +532,46 @@ namespace Sentry.Tests.Protocol.Envelopes
             // which original envelope doesn't have.
             envelopeRoundtrip.Header.Should().BeEquivalentTo(envelope.Header);
             envelopeRoundtrip.Items.Should().ContainSingle();
+            envelopeRoundtrip.Items[0].Payload.Should().BeOfType<JsonSerializable>()
+                .Which.Source.Should().BeEquivalentTo(feedback);
+        }
 
-            var payloadContent = (envelopeRoundtrip.Items[0].Payload as JsonSerializable)?.Source;
-            payloadContent.Should().BeEquivalentTo(feedback);
+        [Fact]
+        public async Task Roundtrip_WithSession_Success()
+        {
+            // Arrange
+            var sessionUpdate = new Session("foo", "bar", "baz").CreateUpdate(true, DateTimeOffset.Now);
+
+            using var envelope = Envelope.FromSession(sessionUpdate);
+
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
+                using var stream = new MemoryStream();
+
+            // Act
+            await envelope.SerializeAsync(stream);
+            stream.Seek(0, SeekOrigin.Begin);
+
+            using var envelopeRoundtrip = await Envelope.DeserializeAsync(stream);
+
+            // Assert
+
+            // Can't compare the entire object graph because output envelope contains evaluated length,
+            // which original envelope doesn't have.
+            envelopeRoundtrip.Header.Should().BeEquivalentTo(envelope.Header);
+            envelopeRoundtrip.Items.Should().ContainSingle();
+            envelopeRoundtrip.Items[0].Payload.Should().BeOfType<JsonSerializable>()
+                .Which.Source.Should().BeEquivalentTo(sessionUpdate);
         }
 
         [Fact]
         public async Task Deserialization_EmptyStream_Throws()
         {
             // Arrange
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var input = new MemoryStream();
 
             // Act & assert
@@ -484,6 +584,9 @@ namespace Sentry.Tests.Protocol.Envelopes
         public async Task Deserialization_InvalidData_Throws()
         {
             // Arrange
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
             using var input = new MemoryStream(new byte[1_000_000]); // all 0's
 
             // Act & assert
@@ -496,15 +599,34 @@ namespace Sentry.Tests.Protocol.Envelopes
         public async Task Deserialization_MalformedData_Throws()
         {
             // Arrange
-            using var input = (
-                // no header
-                "helloworld\n"
-            ).ToMemoryStream();
+#if !NET461 && !NETCOREAPP2_1
+            await
+#endif
+            using var input = "helloworld\n".ToMemoryStream();
 
             // Act & assert
             await Assert.ThrowsAnyAsync<Exception>(
                 async () => await Envelope.DeserializeAsync(input)
             );
+        }
+
+        [Fact]
+        public void FromEvent_Header_IncludesSdkInformation()
+        {
+            // Act
+            var envelope = Envelope.FromEvent(new SentryEvent());
+
+            // Assert
+            envelope.Header.Any(kvp =>
+            {
+                var (key, value) = kvp;
+
+                return
+                    key == "sdk" &&
+                    value is IReadOnlyDictionary<string, string> nested &&
+                    nested["name"] == SdkVersion.Instance.Name &&
+                    nested["version"] == SdkVersion.Instance.Version;
+            }).Should().BeTrue();
         }
     }
 }

@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using Sentry.Extensibility;
+using Sentry.Reflection;
 
 namespace Sentry.Internal
 {
@@ -14,21 +15,17 @@ namespace Sentry.Internal
 
         private readonly Enricher _enricher;
 
-        private readonly Lazy<string?> _release;
-
         private readonly SentryOptions _options;
         internal Func<ISentryStackTraceFactory> SentryStackTraceFactoryAccessor { get; }
 
-        internal string? Release => _release.Value;
+        internal string? Release => ReleaseLocator.Resolve(_options);
 
         public MainSentryEventProcessor(
             SentryOptions options,
-            Func<ISentryStackTraceFactory> sentryStackTraceFactoryAccessor,
-            Lazy<string?>? lazyRelease = null)
+            Func<ISentryStackTraceFactory> sentryStackTraceFactoryAccessor)
         {
             _options = options;
             SentryStackTraceFactoryAccessor = sentryStackTraceFactoryAccessor;
-            _release = lazyRelease ?? new Lazy<string?>(ReleaseLocator.GetCurrent);
 
             _enricher = new Enricher(options);
         }
@@ -77,7 +74,7 @@ namespace Sentry.Internal
 
             if (@event.Release == null)
             {
-                @event.Release = _options.Release ?? Release;
+                @event.Release = Release;
             }
 
             if (@event.Exception == null)
@@ -100,19 +97,33 @@ namespace Sentry.Internal
                 }
             }
 
-            if (_options.ReportAssemblies)
+            if (_options.ReportAssembliesMode != ReportAssembliesMode.None)
             {
                 foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    if (assembly.IsDynamic)
+                    if (assembly is null ||
+                        assembly.IsDynamic)
                     {
                         continue;
                     }
 
                     var asmName = assembly.GetName();
-                    if (asmName.Name is not null && asmName.Version is not null)
+                    if (asmName.Name is null)
                     {
-                        @event.Modules[asmName.Name] = asmName.Version.ToString();
+                        continue;
+                    }
+
+                    var asmVersion = _options.ReportAssembliesMode switch
+                    {
+                        ReportAssembliesMode.Version => asmName.Version?.ToString() ?? string.Empty,
+                        ReportAssembliesMode.InformationalVersion => assembly.GetNameAndVersion().Version ?? string.Empty,
+                        _ => throw new ArgumentOutOfRangeException(
+                            $"Report assemblies mode '{_options.ReportAssembliesMode}' is not yet supported")
+                    };
+
+                    if (!string.IsNullOrWhiteSpace(asmVersion))
+                    {
+                        @event.Modules[asmName.Name] = asmVersion;
                     }
                 }
             }

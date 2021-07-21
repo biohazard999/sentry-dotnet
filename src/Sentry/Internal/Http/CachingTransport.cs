@@ -7,7 +7,6 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Sentry.Extensibility;
-using Sentry.Internal.Extensions;
 using Sentry.Protocol.Envelopes;
 
 namespace Sentry.Internal.Http
@@ -48,13 +47,9 @@ namespace Sentry.Internal.Http
                 ? _options.MaxCacheItems - 1
                 : 0; // just in case MaxCacheItems is set to an invalid value somehow (shouldn't happen)
 
-            _isolatedCacheDirectoryPath = !string.IsNullOrWhiteSpace(options.CacheDirectoryPath)
-                ? _isolatedCacheDirectoryPath = Path.Combine(
-                    options.CacheDirectoryPath,
-                    "Sentry",
-                    options.Dsn?.GetHashString() ?? "no-dsn"
-                )
-                : throw new InvalidOperationException("Cache directory is not set.");
+            _isolatedCacheDirectoryPath =
+                options.TryGetProcessSpecificCacheDirectoryPath() ??
+                throw new InvalidOperationException("Cache directory or DSN is not set.");
 
             _processingDirectoryPath = Path.Combine(_isolatedCacheDirectoryPath, "__processing");
 
@@ -169,7 +164,10 @@ namespace Sentry.Internal.Http
 
                 try
                 {
-                    using var envelopeFile = File.OpenRead(envelopeFilePath);
+#if !NET461 && !NETSTANDARD2_0
+                    await
+#endif
+                        using var envelopeFile = File.OpenRead(envelopeFilePath);
                     using var envelope = await Envelope.DeserializeAsync(envelopeFile, cancellationToken)
                         .ConfigureAwait(false);
 
@@ -279,7 +277,10 @@ namespace Sentry.Internal.Http
 
             Directory.CreateDirectory(_isolatedCacheDirectoryPath);
 
-            using (var stream = File.Create(envelopeFilePath))
+#if !NET461 && !NETSTANDARD2_0
+            await
+#endif
+                using (var stream = File.Create(envelopeFilePath))
             {
                 await envelope.SerializeAsync(stream, cancellationToken).ConfigureAwait(false);
             }

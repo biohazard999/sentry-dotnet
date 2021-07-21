@@ -1,5 +1,7 @@
+using System.Web;
 using Sentry.AspNet.Internal;
 using Sentry.Extensibility;
+using Sentry.Infrastructure;
 
 namespace Sentry.AspNet
 {
@@ -21,7 +23,11 @@ namespace Sentry.AspNet
 
             var eventProcessor = new SystemWebRequestEventProcessor(payloadExtractor, options);
 
-            options.Release ??= SystemWebVersionLocator.GetCurrent();
+            // Ignore options.IsGlobalModeEnable, we always want to use HttpContext as backing store here
+            options.ScopeStackContainer ??= new HttpContextScopeStackContainer();
+
+            options.DiagnosticLogger ??= new TraceDiagnosticLogger(options.DiagnosticLevel);
+            options.Release ??= SystemWebVersionLocator.Resolve(options, HttpContext.Current);
             options.AddEventProcessor(eventProcessor);
         }
     }

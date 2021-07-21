@@ -29,16 +29,9 @@ namespace Sentry
 
         internal static IHub InitHub(SentryOptions options)
         {
-            // Side-effects in a factory function 🤮
             options.SetupLogging();
 
-            var processInfo = ProcessInfo.Instance;
-            if (processInfo is null)
-            {
-                processInfo = new ProcessInfo(options);
-                processInfo.StartAccurateStartupTime();
-                ProcessInfo.Instance = processInfo;
-            }
+            ProcessInfo.Instance ??= new ProcessInfo(options);
 
             // If DSN is null (i.e. not explicitly disabled, just unset), then
             // try to resolve the value from environment.
@@ -329,6 +322,13 @@ namespace Sentry
             => _hub.CaptureTransaction(transaction);
 
         /// <summary>
+        /// Captures a session update.
+        /// </summary>
+        [DebuggerStepThrough]
+        public static void CaptureSession(SessionUpdate sessionUpdate)
+            => _hub.CaptureSession(sessionUpdate);
+
+        /// <summary>
         /// Starts a transaction.
         /// </summary>
         [DebuggerStepThrough]
@@ -388,5 +388,25 @@ namespace Sentry
         [DebuggerStepThrough]
         public static SentryTraceHeader? GetTraceHeader()
             => _hub.GetTraceHeader();
+
+        /// <inheritdoc cref="IHub.StartSession"/>
+        [DebuggerStepThrough]
+        public static void StartSession()
+            => _hub.StartSession();
+
+        /// <inheritdoc cref="IHub.EndSession"/>
+        [DebuggerStepThrough]
+        public static void EndSession(SessionEndStatus status = SessionEndStatus.Exited)
+            => _hub.EndSession(status);
+
+        /// <inheritdoc cref="IHub.PauseSession"/>
+        [DebuggerStepThrough]
+        public static void PauseSession()
+            => _hub.PauseSession();
+
+        /// <inheritdoc cref="IHub.ResumeSession"/>
+        [DebuggerStepThrough]
+        public static void ResumeSession()
+            => _hub.ResumeSession();
     }
 }

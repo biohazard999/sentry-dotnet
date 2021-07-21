@@ -161,6 +161,8 @@ namespace Sentry
             set => _transaction = value;
         }
 
+        internal SessionUpdate? SessionUpdate { get; set; }
+
         /// <inheritdoc />
         public SdkVersion Sdk { get; } = new();
 
@@ -182,7 +184,12 @@ namespace Sentry
         /// <inheritdoc />
         public IReadOnlyDictionary<string, string> Tags => _tags;
 
+#if NETSTANDARD2_0 || NET461
+        private ConcurrentBag<Attachment> _attachments = new();
+#else
         private readonly ConcurrentBag<Attachment> _attachments = new();
+        
+#endif
 
         /// <summary>
         /// Attachments.
@@ -242,6 +249,19 @@ namespace Sentry
         /// Adds an attachment.
         /// </summary>
         public void AddAttachment(Attachment attachment) => _attachments.Add(attachment);
+
+
+        /// <summary>
+        /// Clear all Attachments.
+        /// </summary>
+        public void ClearAttachments()
+        {
+#if NETSTANDARD2_0 || NET461
+            Interlocked.Exchange(ref _attachments, new());
+#else
+            _attachments.Clear();
+#endif
+        }
 
         /// <summary>
         /// Applies the data from this scope to another event-like object.
@@ -328,6 +348,7 @@ namespace Sentry
             Apply((IEventLike)other);
 
             other.Transaction ??= Transaction;
+            other.SessionUpdate ??= SessionUpdate;
 
             foreach (var attachment in Attachments)
             {

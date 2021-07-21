@@ -1,13 +1,14 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
 using System.Reflection;
 using System.Threading.Tasks;
 using FluentAssertions;
 using NSubstitute;
 using Sentry.Extensibility;
+using Sentry.Internal;
 using Sentry.Internal.Http;
+using Sentry.Internal.ScopeStack;
 using Sentry.Protocol.Envelopes;
 using Sentry.Testing;
 using Xunit;
@@ -226,7 +227,7 @@ namespace Sentry.Tests
             second.Dispose();
         }
 
-        [Fact(Skip = "Flaky")]
+        [Fact(Skip = "Flaky (after review)")]
         public async Task Init_WithCache_BlocksUntilExistingCacheIsFlushed()
         {
             // Arrange
@@ -447,10 +448,17 @@ namespace Sentry.Tests
         [Fact]
         public void Implements_Client()
         {
-            var clientMembers = typeof(ISentryClient).GetMembers(BindingFlags.Public | BindingFlags.Instance);
-            var sentrySdk = typeof(SentrySdk).GetMembers(BindingFlags.Public | BindingFlags.Static);
+            var clientMembers = typeof(ISentryClient)
+                .GetMembers(BindingFlags.Public | BindingFlags.Instance)
+                .Select(m => m.ToString())
+                .ToArray();
 
-            Assert.Empty(clientMembers.Select(m => m.ToString()).Except(sentrySdk.Select(m => m.ToString())));
+            var sentrySdkMembers = typeof(SentrySdk)
+                .GetMembers(BindingFlags.Public | BindingFlags.Static)
+                .Select(m => m.ToString())
+                .ToArray();
+
+            sentrySdkMembers.Should().Contain(clientMembers);
         }
 
         [Fact]
@@ -486,6 +494,113 @@ namespace Sentry.Tests
         {
             var sut = SentrySdk.InitHub(new SentryOptions());
             await sut.FlushAsync(TimeSpan.FromDays(1));
+        }
+
+        [Fact]
+        public void InitHub_GlobalModeOff_AsyncLocalContainer()
+        {
+            // Act
+            var sut = SentrySdk.InitHub(new SentryOptions
+            {
+                Dsn = ValidDsnWithoutSecret,
+                IsGlobalModeEnabled = false
+            });
+
+            var hub = (Hub)sut;
+
+            // Assert
+            hub.ScopeManager.ScopeStackContainer.Should().BeOfType<AsyncLocalScopeStackContainer>();
+        }
+
+        [Fact]
+        public void InitHub_GlobalModeOn_GlobalContainer()
+        {
+            // Act
+            var sut = SentrySdk.InitHub(new SentryOptions
+            {
+                Dsn = ValidDsnWithoutSecret,
+                IsGlobalModeEnabled = true
+            });
+
+            var hub = (Hub)sut;
+
+            // Assert
+            hub.ScopeManager.ScopeStackContainer.Should().BeOfType<GlobalScopeStackContainer>();
+        }
+
+        [Fact]
+        public void InitHub_GlobalModeOn_NoWarningOrErrorLogged()
+        {
+            var logger = Substitute.For<IDiagnosticLogger>();
+            logger.IsEnabled(Arg.Any<SentryLevel>()).Returns(true);
+
+            _ = SentrySdk.InitHub(new SentryOptions
+            {
+                Dsn = ValidDsnWithoutSecret,
+                DiagnosticLogger = logger,
+                IsGlobalModeEnabled = true,
+                Debug = true
+            });
+
+            logger.DidNotReceive().Log(
+                    SentryLevel.Warning,
+                    Arg.Any<string>(),
+                    Arg.Any<Exception>(),
+                    Arg.Any<object[]>());
+
+            logger.DidNotReceive().Log(
+                    SentryLevel.Error,
+                    Arg.Any<string>(),
+                    Arg.Any<Exception>(),
+                    Arg.Any<object[]>());
+        }
+
+        [Fact]
+        public void InitHub_GlobalModeOff_NoWarningOrErrorLogged()
+        {
+            var logger = Substitute.For<IDiagnosticLogger>();
+            logger.IsEnabled(Arg.Any<SentryLevel>()).Returns(true);
+
+            _ = SentrySdk.InitHub(new SentryOptions
+            {
+                Dsn = ValidDsnWithoutSecret,
+                DiagnosticLogger = logger,
+                IsGlobalModeEnabled = false,
+                Debug = true
+            });
+
+            logger.DidNotReceive().Log(
+                    SentryLevel.Warning,
+                    Arg.Any<string>(),
+                    Arg.Any<Exception>(),
+                    Arg.Any<object[]>());
+
+            logger.DidNotReceive().Log(
+                    SentryLevel.Error,
+                    Arg.Any<string>(),
+                    Arg.Any<Exception>(),
+                    Arg.Any<object[]>());
+        }
+
+        [Fact]
+        public void InitHub_DebugEnabled_DebugLogsLogged()
+        {
+            var logger = Substitute.For<IDiagnosticLogger>();
+            logger.IsEnabled(Arg.Any<SentryLevel>()).Returns(true);
+
+            _ = SentrySdk.InitHub(new SentryOptions
+            {
+                Dsn = ValidDsnWithoutSecret,
+                DiagnosticLogger = logger,
+                IsGlobalModeEnabled = true,
+                Debug = true
+            });
+
+            logger.Received().Log(
+                    SentryLevel.Debug,
+                    Arg.Any<string>(),
+                    Arg.Any<Exception>(),
+                    Arg.Any<object[]>());
         }
     }
 }

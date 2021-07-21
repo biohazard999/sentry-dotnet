@@ -41,7 +41,7 @@ namespace Sentry.Tests.PlatformAbstractions
             }
         }
 
-#if NETFX
+#if NET461
         [SkippableFact]
         public void SetReleaseAndVersionNetFx_OnNetFx_NonNullReleaseAndVersion()
         {
@@ -57,7 +57,7 @@ namespace Sentry.Tests.PlatformAbstractions
         }
 #endif
 
-#if NETCOREAPP
+#if NETCOREAPP2_1 || NETCOREAPP3_0
         [Fact]
         public void SetNetCoreVersion_NetCoreAsName()
         {
@@ -69,7 +69,7 @@ namespace Sentry.Tests.PlatformAbstractions
         }
 #endif
 
-#if NET5_0
+#if NET5_0_OR_GREATER
         [Fact]
         public void SetNetCoreVersion_Net5Runtime_NullNetCoreVersion()
         {
