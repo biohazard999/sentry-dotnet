@@ -1,83 +1,83 @@
-using System.Collections.Generic;
-using Sentry.Protocol;
-using Xunit;
+namespace Sentry.Tests.Protocol;
 
-namespace Sentry.Tests.Protocol
+public class UserTests
 {
-    public class UserTests
+    private readonly IDiagnosticLogger _testOutputLogger;
+
+    public UserTests(ITestOutputHelper output)
     {
-        [Fact]
-        public void SerializeObject_AllPropertiesSetToNonDefault_SerializesValidObject()
+        _testOutputLogger = new TestOutputDiagnosticLogger(output);
+    }
+
+    [Fact]
+    public void SerializeObject_AllPropertiesSetToNonDefault_SerializesValidObject()
+    {
+        var sut = new SentryUser
         {
-            var sut = new User
+            Id = "user-id",
+            Username = "user-name",
+            Email = "test@sentry.io",
+            IpAddress = "::1",
+            Other = new Dictionary<string, string> { { "testCustomValueKey", "testCustomValue" } }
+        };
+
+        var actual = sut.ToJsonString(_testOutputLogger, indented: true);
+
+        Assert.Equal("""
             {
-                Id = "user-id",
-                Email = "test@sentry.io",
-                IpAddress = "::1",
-                Username = "user-name",
-                Other = new Dictionary<string, string> {{"testCustomValueKey", "testCustomValue"}}
-            };
+              "id": "user-id",
+              "username": "user-name",
+              "email": "test@sentry.io",
+              "ip_address": "::1",
+              "other": {
+                "testCustomValueKey": "testCustomValue"
+              }
+            }
+            """,
+            actual);
+    }
 
-            var actual = sut.ToJsonString();
-
-            Assert.Equal(
-                "{" +
-                "\"email\":\"test@sentry.io\"," +
-                "\"id\":\"user-id\"," +
-                "\"ip_address\":\"::1\"," +
-                "\"username\":\"user-name\"," +
-                "\"other\":{\"testCustomValueKey\":\"testCustomValue\"}" +
-                "}",
-                actual
-            );
-        }
-
-        [Fact]
-        public void Clone_CopyValues()
+    [Fact]
+    public void Clone_CopyValues()
+    {
+        var sut = new SentryUser
         {
-            var sut = new User()
+            Id = "id",
+            Email = "emal@sentry.io",
+            IpAddress = "::1",
+            Username = "user",
+            Other = new Dictionary<string, string>
             {
-                Id = "id",
-                Email = "emal@sentry.io",
-                IpAddress = "::1",
-                Username = "user",
-                Other = new Dictionary<string, string>
-                            {
-                                {"testCustomValueKey", "testCustomValue"}
-                            }
-            };
+                {"testCustomValueKey", "testCustomValue"}
+            }
+        };
 
-            var clone = sut.Clone();
+        var clone = sut.Clone();
 
-            Assert.Equal(sut.Id, clone.Id);
-            Assert.Equal(sut.Email, clone.Email);
-            Assert.Same(sut.IpAddress, clone.IpAddress);
-            Assert.Equal(sut.Username, clone.Username);
-            Assert.Equal(sut.Other, clone.Other);
-        }
+        Assert.Equal(sut.Id, clone.Id);
+        Assert.Equal(sut.Username, clone.Username);
+        Assert.Equal(sut.Email, clone.Email);
+        Assert.Equal(sut.IpAddress, clone.IpAddress);
+        Assert.Equal(sut.Other, clone.Other);
+    }
 
-        [Theory]
-        [MemberData(nameof(TestCases))]
-        public void SerializeObject_TestCase_SerializesAsExpected((User user, string serialized) @case)
-        {
-            var actual = @case.user.ToJsonString();
+    [Theory]
+    [MemberData(nameof(TestCases))]
+    public void SerializeObject_TestCase_SerializesAsExpected((SentryUser user, string serialized) @case)
+    {
+        var actual = @case.user.ToJsonString(_testOutputLogger);
+        Assert.Equal(@case.serialized, actual);
+    }
 
-            Assert.Equal(@case.serialized, actual);
-        }
+    public static IEnumerable<object[]> TestCases()
+    {
+        yield return new object[] { (new SentryUser(), "{}") };
+        yield return new object[] { (new SentryUser { Id = "some id" }, """{"id":"some id"}""") };
+        yield return new object[] { (new SentryUser { Username = "some username" }, """{"username":"some username"}""") };
+        yield return new object[] { (new SentryUser { Email = "some email" }, """{"email":"some email"}""") };
+        yield return new object[] { (new SentryUser { IpAddress = "some ipAddress" }, """{"ip_address":"some ipAddress"}""") };
 
-        public static IEnumerable<object[]> TestCases()
-        {
-            yield return new object[] { (new User(), "{}") };
-            yield return new object[] { (new User { Id = "some id" }, "{\"id\":\"some id\"}") };
-            yield return new object[] { (new User { Email = "some email" }, "{\"email\":\"some email\"}") };
-            yield return new object[] { (new User { IpAddress = "some ipAddress" }, "{\"ip_address\":\"some ipAddress\"}") };
-            yield return new object[] { (new User { Username = "some username" }, "{\"username\":\"some username\"}") };
-            yield return new object[] { (new User {Other = new Dictionary<string, string>
-                            {
-                                {"testCustomValueKey", "testCustomValue"}
-                            }
-
-            }, "{\"other\":{\"testCustomValueKey\":\"testCustomValue\"}}") };
-        }
+        var other = new Dictionary<string, string> { { "testCustomValueKey", "testCustomValue" } };
+        yield return new object[] { (new SentryUser { Other = other }, """{"other":{"testCustomValueKey":"testCustomValue"}}""") };
     }
 }

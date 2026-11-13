@@ -1,43 +1,41 @@
-#if NETFX
-using Sentry.Integrations;
+#if NETFRAMEWORK
 using Sentry.PlatformAbstractions;
-using Xunit;
 
-namespace Sentry.Tests.Integrations
+namespace Sentry.Tests.Integrations;
+
+public class NetFxInstallationsIntegrationTests
 {
-    public class NetFxInstallationsIntegrationTests
+    [SkippableFact]
+    public void Register_CurrentRuntimeIsMono_NetFxInstallationsEventProcessorNotAdded()
     {
-        [SkippableFact]
-        public void Register_CurrentRuntimeIsMono_NetFxInstallationsEventProcessorNotAdded()
-        {
-            Skip.If(!Runtime.Current.IsMono());
+        Skip.If(!SentryRuntime.Current.IsMono());
 
-            //Arrange
-            var options = new SentryOptions();
-            var integration = new NetFxInstallationsIntegration();
+        //Arrange
+        var options = new SentryOptions();
+        var integration = new NetFxInstallationsIntegration();
 
-            //Act
-            integration.Register(null!, options);
+        //Act
+        integration.Register(null!, options);
 
-            //Assert
-            Assert.DoesNotContain(options.EventProcessors!, p => p.GetType() == typeof(NetFxInstallationsEventProcessor));
-        }
+        //Assert
+        Assert.DoesNotContain(options.EventProcessors!, p => p.Lazy.Value.GetType() == typeof(NetFxInstallationsEventProcessor));
+    }
 
-        [SkippableFact]
-        public void Register_CurrentRuntimeIsNotMono_NetFxInstallationsEventProcessorAdded()
-        {
-            Skip.If(Runtime.Current.IsMono());
+    [SkippableFact]
+    public void Register_CurrentRuntimeIsNotMono_NetFxInstallationsEventProcessorAdded()
+    {
+        Skip.If(SentryRuntime.Current.IsMono());
 
-            //Arrange
-            var options = new SentryOptions();
-            var integration = new NetFxInstallationsIntegration();
+        //Arrange
+        var options = new SentryOptions();
+        var integration = new NetFxInstallationsIntegration();
 
-            //Act
-            integration.Register(null!, options);
+        //Act
+        integration.Register(null!, options);
 
-            //Assert
-            Assert.Contains(options.EventProcessors!, p => p.GetType() == typeof(NetFxInstallationsEventProcessor));
-        }
+        //Assert
+        Assert.Contains(options.EventProcessors!, p => p.Lazy.Value.GetType() == typeof(NetFxInstallationsEventProcessor));
     }
 }
+
 #endif

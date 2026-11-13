@@ -1,36 +1,59 @@
-using Sentry.Protocol;
-using Serilog.Events;
+namespace Sentry.Serilog;
 
-namespace Sentry.Serilog
+internal static class SentryExtensions
 {
-    internal static class LogLevelExtensions
+    public static bool TryGetSourceContext(this LogEvent logEvent, [NotNullWhen(true)] out string? sourceContext)
     {
-        public static SentryLevel? ToSentryLevel(this LogEventLevel loggingLevel)
+        if (logEvent.Properties.TryGetValue("SourceContext", out var prop) &&
+            prop is ScalarValue { Value: string sourceContextValue })
         {
-            return loggingLevel switch
-            {
-                LogEventLevel.Fatal => SentryLevel.Fatal,
-                LogEventLevel.Error => SentryLevel.Error,
-                LogEventLevel.Warning => SentryLevel.Warning,
-                LogEventLevel.Information => SentryLevel.Info,
-                LogEventLevel.Debug => SentryLevel.Debug,
-                LogEventLevel.Verbose => SentryLevel.Debug,
-                _ => null
-            };
+            sourceContext = sourceContextValue;
+            return true;
         }
 
-        public static BreadcrumbLevel ToBreadcrumbLevel(this LogEventLevel level)
+        sourceContext = null;
+        return false;
+    }
+
+    public static SentryLevel? ToSentryLevel(this LogEventLevel loggingLevel)
+    {
+        return loggingLevel switch
         {
-            return level switch
-            {
-                LogEventLevel.Verbose => BreadcrumbLevel.Debug,
-                LogEventLevel.Debug => BreadcrumbLevel.Debug,
-                LogEventLevel.Information => BreadcrumbLevel.Info,
-                LogEventLevel.Warning => BreadcrumbLevel.Warning,
-                LogEventLevel.Error => BreadcrumbLevel.Error,
-                LogEventLevel.Fatal => BreadcrumbLevel.Critical,
-                _ => (BreadcrumbLevel)level
-            };
-        }
+            LogEventLevel.Fatal => SentryLevel.Fatal,
+            LogEventLevel.Error => SentryLevel.Error,
+            LogEventLevel.Warning => SentryLevel.Warning,
+            LogEventLevel.Information => SentryLevel.Info,
+            LogEventLevel.Debug => SentryLevel.Debug,
+            LogEventLevel.Verbose => SentryLevel.Debug,
+            _ => null
+        };
+    }
+
+    public static BreadcrumbLevel ToBreadcrumbLevel(this LogEventLevel level)
+    {
+        return level switch
+        {
+            LogEventLevel.Verbose => BreadcrumbLevel.Debug,
+            LogEventLevel.Debug => BreadcrumbLevel.Debug,
+            LogEventLevel.Information => BreadcrumbLevel.Info,
+            LogEventLevel.Warning => BreadcrumbLevel.Warning,
+            LogEventLevel.Error => BreadcrumbLevel.Error,
+            LogEventLevel.Fatal => BreadcrumbLevel.Fatal,
+            _ => (BreadcrumbLevel)level
+        };
+    }
+
+    public static SentryLogLevel ToSentryLogLevel(this LogEventLevel level)
+    {
+        return level switch
+        {
+            LogEventLevel.Verbose => SentryLogLevel.Trace,
+            LogEventLevel.Debug => SentryLogLevel.Debug,
+            LogEventLevel.Information => SentryLogLevel.Info,
+            LogEventLevel.Warning => SentryLogLevel.Warning,
+            LogEventLevel.Error => SentryLogLevel.Error,
+            LogEventLevel.Fatal => SentryLogLevel.Fatal,
+            _ => (SentryLogLevel)level,
+        };
     }
 }

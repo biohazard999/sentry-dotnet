@@ -1,90 +1,58 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Xunit;
 
-namespace Sentry.Extensions.Logging.Tests
+namespace Sentry.Extensions.Logging.Tests;
+
+public class ConfigurationOptionsTests
 {
-    public class ConfigurationOptionsTests
+    private class Fixture
     {
-        private class Fixture
-        {
-            public ConfigurationBuilder Builder { get; set; }
+        public ConfigurationBuilder Builder { get; set; }
 
-            public Fixture()
+        public Fixture()
+        {
+            Builder = new ConfigurationBuilder();
+#if ANDROID
+            var stream = Application.Context.Assets?.Open("appsettings.json");
+            if (stream != null)
             {
-                Builder = new ConfigurationBuilder();
-                _ = Builder.AddJsonFile(Path.Combine(Environment.CurrentDirectory, "appsettings.json"));
+                Builder.AddJsonStream(stream);
             }
-
-            public IServiceProvider GetSut()
-            {
-                var configuration = Builder.Build();
-                var services = new ServiceCollection();
-                _ = services.AddLogging(builder => builder.AddConfiguration(configuration).AddSentry());
-                return services.BuildServiceProvider();
-            }
+#else
+            Builder.AddJsonFile(Path.Combine(Environment.CurrentDirectory, "appsettings.json"));
+#endif
         }
 
-        private readonly Fixture _fixture = new();
-
-        [Fact]
-        public void SentryLoggingOptions_ValuesFromAppSettings()
+        public IServiceProvider GetSut()
         {
-            var provider = _fixture.GetSut();
-            var sentryLoggingOptions = provider.GetRequiredService<IOptions<SentryLoggingOptions>>().Value;
-
-            Assert.False(sentryLoggingOptions.InitializeSdk);
-            Assert.Equal(LogLevel.Warning, sentryLoggingOptions.MinimumBreadcrumbLevel);
-            Assert.Equal(LogLevel.Critical, sentryLoggingOptions.MinimumEventLevel);
+            var configuration = Builder.Build();
+            var services = new ServiceCollection();
+            _ = services.AddLogging(builder => builder.AddConfiguration(configuration).AddSentry());
+            return services.BuildServiceProvider();
         }
+    }
 
-        [Fact]
-        public void SentryOptions_InitializeTrue_ValuesAppliedFromLoggingOptions()
+    private readonly Fixture _fixture = new();
+
+    [Fact]
+    public void SentryLoggingOptions_ValuesFromAppSettings()
+    {
+        var provider = _fixture.GetSut();
+        var sentryLoggingOptions = provider.GetRequiredService<IOptions<SentryLoggingOptions>>().Value;
+
+        using (new AssertionScope())
         {
-            var dict = new Dictionary<string, string>
-            {
-                {"Sentry:InitializeSdk", "true"},
-            };
-
-            _ = _fixture.Builder.AddInMemoryCollection(dict);
-
-            var provider = _fixture.GetSut();
-            var sentryLoggingOptions = provider.GetRequiredService<IOptions<SentryLoggingOptions>>().Value;
-
-            Assert.Equal(150, sentryLoggingOptions.MaxBreadcrumbs);
-            Assert.Equal("e386dfd", sentryLoggingOptions.Release);
-            Assert.Equal("https://80aed643f81249d4bed3e30687b310ab@o447951.ingest.sentry.io/5428537", sentryLoggingOptions.Dsn);
+            sentryLoggingOptions.MinimumBreadcrumbLevel.Should().Be(LogLevel.Warning);
+            sentryLoggingOptions.MinimumEventLevel.Should().Be(LogLevel.Critical);
         }
+    }
 
-        [Fact]
-        public void SentryOptions_DefaultTags_ValuesApplied()
-        {
-            const string expectedKey = "expected_key";
-            const string expectedValue = "expected value";
-            var dict = new Dictionary<string, string>
-            {
-                {"Sentry:DefaultTags:" + expectedKey, expectedValue},
-            };
-
-            _ = _fixture.Builder.AddInMemoryCollection(dict);
-
-            var provider = _fixture.GetSut();
-            var sentryLoggingOptions = provider.GetRequiredService<IOptions<SentryLoggingOptions>>().Value;
-
-            Assert.Equal(expectedValue, sentryLoggingOptions.DefaultTags[expectedKey]);
-        }
-
-        [Fact]
-        public void SentryLoggerProvider_ResolvedFromILoggerProvider()
-        {
-            var provider = _fixture.GetSut();
-            _ = Assert.Single(provider.GetServices<ILoggerProvider>().OfType<SentryLoggerProvider>());
-        }
+    [Fact]
+    public void SentryLoggerProvider_ResolvedFromILoggerProvider()
+    {
+        var provider = _fixture.GetSut();
+        _ = Assert.Single(provider.GetServices<ILoggerProvider>().OfType<SentryLoggerProvider>());
     }
 }

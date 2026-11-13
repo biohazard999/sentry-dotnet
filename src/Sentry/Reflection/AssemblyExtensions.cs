@@ -1,32 +1,50 @@
-using System.ComponentModel;
-using System.Reflection;
+namespace Sentry.Reflection;
 
-namespace Sentry.Reflection
+/// <summary>
+/// Extension methods to <see cref="Assembly"/>.
+/// </summary>
+[EditorBrowsable(EditorBrowsableState.Never)]
+public static class AssemblyExtensions
 {
     /// <summary>
-    /// Extension methods to <see cref="Assembly"/>.
+    /// Get the assemblies Name and Version.
     /// </summary>
-    [EditorBrowsable(EditorBrowsableState.Never)]
-    public static class AssemblyExtensions
+    /// <remarks>
+    /// Attempts to read the version from <see cref="AssemblyInformationalVersionAttribute"/>.
+    /// If not available, falls back to <see cref="AssemblyName.Version"/>.
+    /// </remarks>
+    /// <param name="asm">The assembly to get the name and version from.</param>
+    /// <returns>The SdkVersion.</returns>
+    public static SdkVersion GetNameAndVersion(this Assembly asm)
     {
-        /// <summary>
-        /// Get the assemblies Name and Version.
-        /// </summary>
-        /// <remarks>
-        /// Attempts to read the version from <see cref="AssemblyInformationalVersionAttribute"/>.
-        /// If not available, falls back to <see cref="AssemblyName.Version"/>.
-        /// </remarks>
-        /// <param name="asm">The assembly to get the name and version from.</param>
-        /// <returns>The SdkVersion.</returns>
-        public static SdkVersion GetNameAndVersion(this Assembly asm)
+        return new SdkVersion
         {
-            var asmName = asm.GetName();
-            var name = asmName.Name;
-            var version =
-                asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-                ?? asmName?.Version?.ToString();
+            Name = asm.GetName().Name,
+            Version = asm.GetVersion()
+        };
+    }
 
-            return new SdkVersion {Name = name, Version = version};
+    internal static SentryPackage? GetNuGetPackage(this Assembly assembly)
+        => assembly.GetVersion() is { } version
+            ? new SentryPackage("nuget:" + assembly.GetName().Name, version)
+            : null;
+
+    internal static string? GetVersion(this Assembly assembly)
+    {
+        try
+        {
+            var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (!string.IsNullOrEmpty(informationalVersion))
+            {
+                return informationalVersion;
+            }
         }
+        catch
+        {
+            // Note: on full .NET FX, checking the AssemblyInformationalVersionAttribute could throw an exception,
+            // therefore this method uses a try/catch to make sure this method always returns a value
+        }
+
+        return assembly.GetName().Version?.ToString();
     }
 }

@@ -1,31 +1,31 @@
-using System.Reflection;
 using Sentry.Reflection;
 
-namespace Sentry.Internal
+namespace Sentry.Internal;
+
+internal static class ApplicationVersionLocator
 {
-    internal static class ApplicationVersionLocator
+    internal static string? GetCurrent(Assembly? asm)
     {
-        public static string? GetCurrent() => GetCurrent(Assembly.GetEntryAssembly());
-
-        internal static string? GetCurrent(Assembly? asm)
+        if (asm is null)
         {
-            if (asm is null)
-            {
-                return null;
-            }
-
-            var nameAndVersion = asm.GetNameAndVersion();
-
-            if (string.IsNullOrWhiteSpace(nameAndVersion.Name) ||
-                string.IsNullOrWhiteSpace(nameAndVersion.Version))
-            {
-                return null;
-            }
-
-            // Don't add name prefix if it's already set by the user
-            return !nameAndVersion.Version.Contains('@')
-                ? $"{nameAndVersion.Name}@{nameAndVersion.Version}"
-                : nameAndVersion.Version;
+            return null;
         }
+
+        var name = asm.GetName().Name;
+        var version = asm.GetVersion();
+        if (string.IsNullOrWhiteSpace(name) ||
+            string.IsNullOrWhiteSpace(version))
+        {
+            return null;
+        }
+
+        // Don't add name prefix if it's already set by the user
+        if (version.Contains('@'))
+        {
+            return version;
+        }
+
+        return $"{name}@{version}";
+
     }
 }

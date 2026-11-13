@@ -1,67 +1,60 @@
-using System.Collections.Generic;
-using System.ComponentModel;
 using Google.Protobuf;
 using Grpc.Core;
 using Microsoft.Extensions.DependencyInjection;
+using Sentry.Internal.Extensions;
 
-namespace Sentry.AspNetCore.Grpc
+namespace Sentry.AspNetCore.Grpc;
+
+/// <summary>
+/// Scope Extensions
+/// </summary>
+[EditorBrowsable(EditorBrowsableState.Never)]
+public static class ScopeExtensions
 {
     /// <summary>
-    /// Scope Extensions
+    /// Populates the scope with the gRPC data
     /// </summary>
-    [EditorBrowsable(EditorBrowsableState.Never)]
-    public static class ScopeExtensions
+    public static void Populate<TRequest>(this Scope scope, ServerCallContext context, TRequest? request,
+        SentryAspNetCoreOptions options) where TRequest : class
     {
-        /// <summary>
-        /// Populates the scope with the gRPC data
-        /// </summary>
-        public static void Populate<TRequest>(this Scope scope, ServerCallContext context, TRequest? request,
-            SentryAspNetCoreOptions options) where TRequest : class
+        // Not to throw on code that ignores nullability warnings.
+        if (scope.IsNull() || context.IsNull() || options.IsNull())
         {
-            // Not to throw on code that ignores nullability warnings.
-            // ReSharper disable ConditionIsAlwaysTrueOrFalse
-            if (scope is null || context is null || options is null)
-            {
-                return;
-            }
-            // ReSharper restore ConditionIsAlwaysTrueOrFalse
-
-            scope.SetTag("grpc.method", context.Method);
-
-            if (request is IMessage requestMessage)
-            {
-                SetBody(scope, context, requestMessage, options);
-            }
+            return;
         }
 
-        private static void SetBody<TRequest>(Scope scope, ServerCallContext context, TRequest request,
-            SentryAspNetCoreOptions options) where TRequest : class, IMessage
+        scope.SetTag("grpc.method", context.Method);
+
+        if (request is IMessage requestMessage)
         {
-            var httpContext = context.GetHttpContext();
-            var extractors = httpContext.RequestServices
-                .GetService<IEnumerable<IProtobufRequestPayloadExtractor>>();
+            SetBody(scope, context, requestMessage, options);
+        }
+    }
 
-            if (extractors == null)
-            {
-                return;
-            }
+    private static void SetBody<TRequest>(Scope scope, ServerCallContext context, TRequest request,
+        SentryAspNetCoreOptions options) where TRequest : class, IMessage
+    {
+        var httpContext = context.GetHttpContext();
+        var extractors = httpContext.RequestServices
+            .GetService<IEnumerable<IProtobufRequestPayloadExtractor>>();
 
-            var dispatcher =
-                new ProtobufRequestExtractionDispatcher(extractors, options,
-                    () => options.MaxRequestBodySize);
+        if (extractors == null)
+        {
+            return;
+        }
 
-            var adapter = new GrpcRequestAdapter<TRequest>(request);
+        var dispatcher =
+            new ProtobufRequestExtractionDispatcher(extractors, options,
+                () => options.MaxRequestBodySize);
 
-            var message = dispatcher.ExtractPayload(adapter);
+        var adapter = new GrpcRequestAdapter<TRequest>(request);
 
-            if (message != null)
-            {
-                // Convert message into JSON format for readability
+        var message = dispatcher.ExtractPayload(adapter);
 
-                string jsonData = JsonFormatter.Default.Format(message);
-
-                scope.Request.Data = jsonData;
-            }
+        if (message != null)
+        {
+            // Convert message into JSON format for readability
+            scope.Request.Data = JsonFormatter.Default.Format(message);
         }
     }
 }

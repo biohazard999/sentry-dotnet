@@ -1,48 +1,48 @@
-using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
-using NSubstitute;
-using Sentry.Extensibility;
-using Xunit;
 
-namespace Sentry.AspNetCore.Tests
+namespace Sentry.AspNetCore.Tests;
+
+public class FormRequestPayloadExtractorTests : BaseRequestPayloadExtractorTests<FormRequestPayloadExtractor>
 {
-    public class FormRequestPayloadExtractorTests : BaseRequestPayloadExtractorTests<FormRequestPayloadExtractor>
+    protected override string SupportedContentType => "application/x-www-form-urlencoded";
+
+    public FormRequestPayloadExtractorTests()
     {
-        public FormRequestPayloadExtractorTests()
-        {
-            TestFixture = new Fixture();
-            _ = TestFixture.HttpRequest.ContentType.Returns("application/x-www-form-urlencoded");
-        }
+        TestFixture = new Fixture();
+    }
 
-        [Fact]
-        public void ExtractPayload_SupportedContentType_ReadForm()
-        {
-            var expected = new Dictionary<string, StringValues> { { "key", new StringValues("val") } };
-            var f = new FormCollection(expected);
-            _ = TestFixture.HttpRequestCore.Form.Returns(f);
+    [Theory]
+    [InlineData("application/x-www-form-urlencoded")]
+    [InlineData("application/x-www-form-urlencoded; charset=utf-8")]
+    public void ExtractPayload_SupportedContentType_ReadForm(string contentType)
+    {
+        TestFixture.HttpRequest.ContentType.Returns(contentType);
 
-            var sut = TestFixture.GetSut();
+        var expected = new Dictionary<string, StringValues> { { "key", new StringValues("val") } };
+        var f = new FormCollection(expected);
+        _ = TestFixture.HttpRequestCore.Form.Returns(f);
 
-            var actual = sut.ExtractPayload(TestFixture.HttpRequest);
-            Assert.NotNull(actual);
+        var sut = TestFixture.GetSut();
 
-            var actualDic = actual as IDictionary<string, IEnumerable<string>>;
-            Assert.NotNull(actualDic);
+        var actual = sut.ExtractPayload(TestFixture.HttpRequest);
+        Assert.NotNull(actual);
 
-            Assert.Equal(expected.Count, actualDic.Count);
-        }
+        var actualDic = actual as IDictionary<string, IEnumerable<string>>;
+        Assert.NotNull(actualDic);
 
-        [Fact]
-        public void ExtractPayload_UnsupportedContentType_DoesNotReadStream()
-        {
-            _ = TestFixture.HttpRequest.ContentType.Returns("application/json");
+        Assert.Equal(expected.Count, actualDic.Count);
+    }
 
-            var sut = TestFixture.GetSut();
+    [Fact]
+    public void ExtractPayload_UnsupportedContentType_DoesNotReadStream()
+    {
+        TestFixture.HttpRequest.ContentType.Returns("application/json");
 
-            Assert.Null(sut.ExtractPayload(TestFixture.HttpRequest));
+        var sut = TestFixture.GetSut();
 
-            TestFixture.Stream.DidNotReceive().Position = Arg.Any<long>();
-        }
+        Assert.Null(sut.ExtractPayload(TestFixture.HttpRequest));
+
+        TestFixture.Stream.DidNotReceive().Position = Arg.Any<long>();
     }
 }

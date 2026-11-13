@@ -1,67 +1,53 @@
-﻿using System;
 using Sentry.Protocol.Envelopes;
 
-namespace Sentry.Internal.Http
+namespace Sentry.Internal.Http;
+
+internal class RateLimitCategory : IEquatable<RateLimitCategory>
 {
-    internal class RateLimitCategory : IEquatable<RateLimitCategory>
+    public string Name { get; }
+
+    public bool IsMatchAll => string.IsNullOrWhiteSpace(Name);
+
+    public RateLimitCategory(string name) => Name = name;
+
+    public bool Matches(EnvelopeItem item) =>
+        // Rate limits are keyed by data category (e.g. "error", "monitor", "metric_bucket"), not envelope item type.
+        IsMatchAll || string.Equals(Name, item.DataCategory.ToString(), StringComparison.OrdinalIgnoreCase);
+
+    public bool Equals(RateLimitCategory? other)
     {
-        public string Name { get; }
-
-        public bool IsMatchAll => string.IsNullOrWhiteSpace(Name);
-
-        public RateLimitCategory(string name) => Name = name;
-
-        public bool Matches(EnvelopeItem item)
+        if (ReferenceEquals(null, other))
         {
-            if (IsMatchAll)
-            {
-                return true;
-            }
-
-            var type = item.TryGetType();
-            if (string.IsNullOrWhiteSpace(type))
-            {
-                return false;
-            }
-
-            return string.Equals(Name, type, StringComparison.OrdinalIgnoreCase);
+            return false;
         }
 
-        public bool Equals(RateLimitCategory? other)
+        if (ReferenceEquals(this, other))
         {
-            if (ReferenceEquals(null, other))
-            {
-                return false;
-            }
-
-            if (ReferenceEquals(this, other))
-            {
-                return true;
-            }
-
-            return string.Equals(Name, other.Name, StringComparison.OrdinalIgnoreCase);
+            return true;
         }
 
-        public override bool Equals(object? obj)
-        {
-            if (ReferenceEquals(null, obj))
-            {
-                return false;
-            }
-
-            if (ReferenceEquals(this, obj))
-            {
-                return true;
-            }
-
-            if (obj.GetType() != GetType())
-            {
-                return false;
-            }
-
-            return Equals((RateLimitCategory) obj);
-        }
-
-        public override int GetHashCode() => StringComparer.OrdinalIgnoreCase.GetHashCode(Name);
+        return string.Equals(Name, other.Name, StringComparison.OrdinalIgnoreCase);
     }
+
+    public override bool Equals(object? obj)
+    {
+        if (ReferenceEquals(null, obj))
+        {
+            return false;
+        }
+
+        if (ReferenceEquals(this, obj))
+        {
+            return true;
+        }
+
+        if (obj.GetType() != GetType())
+        {
+            return false;
+        }
+
+        return Equals((RateLimitCategory)obj);
+    }
+
+    public override int GetHashCode() => StringComparer.OrdinalIgnoreCase.GetHashCode(Name);
 }

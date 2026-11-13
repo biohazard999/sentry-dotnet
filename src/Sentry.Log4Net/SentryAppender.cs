@@ -1,195 +1,227 @@
-using System;
-using System.Collections.Generic;
-using log4net.Appender;
-using log4net.Core;
-using Sentry.Extensibility;
-using Sentry.Protocol;
-using Sentry.Reflection;
+using Sentry.Internal.Extensions;
 
-namespace Sentry.Log4Net
+namespace Sentry.Log4Net;
+
+/// <summary>
+/// Sentry appender for log4net.
+/// </summary>
+public partial class SentryAppender : AppenderSkeleton
 {
+    private static readonly SentryPackage? Package = typeof(SentryAppender).Assembly.GetNuGetPackage();
+
+    private readonly IHub _hub;
+    private readonly UninitializedSdkWarning _uninitializedSdkWarning;
+
+    internal const string UninitializedSdkMessage =
+        "Sentry: the Sentry appender for log4net dropped a log event because Sentry is not initialized, but a " +
+        "DSN was found in the environment or in an assembly attribute. The appender no longer initializes the " +
+        "SDK: call SentrySdk.Init (or UseSentry via one of the integrations) at startup. " +
+        "See https://docs.sentry.io/platforms/dotnet/guides/log4net/";
+
+    internal const string ObsoleteDsn =
+        "The Sentry appender no longer initializes the SDK, so a DSN can no longer be supplied to it. " +
+        "Initialize Sentry with SentrySdk.Init (or UseSentry via one of the integrations), and remove 'Dsn' " +
+        "and any other core SDK settings from the appender configuration.";
+
     /// <summary>
-    /// Sentry appender for log4net.
+    /// Not supported. The Sentry appender no longer initializes the SDK.
     /// </summary>
-    public class SentryAppender : AppenderSkeleton
+    /// <exception cref="NotSupportedException">When set.</exception>
+    [Obsolete(ObsoleteDsn, error: true)]
+    public string? Dsn
     {
-        private readonly Func<string, IDisposable> _initAction;
-        private volatile IDisposable? _sdkHandle;
+        get => null;
+        set => throw new NotSupportedException(ObsoleteDsn);
+    }
 
-        private readonly object _initSync = new();
+    /// <summary>
+    /// Whether to send the Identity or not.
+    /// </summary>
+    public bool SendIdentity { get; set; }
 
-        internal static readonly SdkVersion NameAndVersion
-            = typeof(SentryAppender).Assembly.GetNameAndVersion();
+    /// <summary>
+    /// Lowest level required for a log message to become an event.
+    /// Every level above threshold and below this level will become a breadcrumb.
+    /// </summary>
+    public Level? MinimumEventLevel { get; set; }
 
-        private static readonly string ProtocolPackageName = "nuget:" + NameAndVersion.Name;
+    /// <summary>
+    /// Creates a new instance of the <see cref="SentryAppender"/>.
+    /// </summary>
+    public SentryAppender() : this(HubAdapter.Instance)
+    { }
 
-        internal IHub Hub { get; set; }
+    internal SentryAppender(IHub hub, UninitializedSdkWarning? uninitializedSdkWarning = null)
+    {
+        _hub = hub;
+        _uninitializedSdkWarning = uninitializedSdkWarning
+                                   ?? new UninitializedSdkWarning(
+                                       message => LogLog.Warn(typeof(SentryAppender), message));
+    }
 
-        /// <summary>
-        /// Sentry DSN.
-        /// </summary>
-        public string? Dsn { get; set; }
-        /// <summary>
-        /// Whether to send the Identity or not.
-        /// </summary>
-        public bool SendIdentity { get; set; }
-        /// <summary>
-        /// Environment to send in the event.
-        /// </summary>
-        public string? Environment { get; set; }
-
-        /// <summary>
-        /// Creates a new instance of the <see cref="SentryAppender"/>.
-        /// </summary>
-        public SentryAppender() : this(SentrySdk.Init, HubAdapter.Instance)
-        { }
-
-        internal SentryAppender(
-            Func<string, IDisposable> initAction,
-            IHub hubGetter)
+    /// <summary>
+    /// Append log.
+    /// </summary>
+    /// <param name="loggingEvent">The event.</param>
+    protected override void Append(LoggingEvent loggingEvent)
+    {
+        // Not to throw on code that ignores nullability warnings.
+        if (loggingEvent.IsNull())
         {
-            _initAction = initAction;
-            Hub = hubGetter;
+            return;
         }
 
-        /// <summary>
-        /// Append log.
-        /// </summary>
-        /// <param name="loggingEvent">The event.</param>
-        protected override void Append(LoggingEvent loggingEvent)
+        if (!_hub.IsEnabled)
         {
-            // Not to throw on code that ignores nullability warnings.
-            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-            if (loggingEvent is null)
+            if (MinimumEventLevel is null || loggingEvent.Level >= MinimumEventLevel)
             {
-                return;
+                _uninitializedSdkWarning.WarnOnce(UninitializedSdkMessage);
             }
 
-            if (!Hub.IsEnabled && _sdkHandle == null)
-            {
-                if (Dsn == null)
-                {
-                    return;
-                }
+            return;
+        }
 
-                lock (_initSync)
-                {
-                    // ReSharper disable once NonAtomicCompoundOperator Double init guarded by the lock
-                    _sdkHandle ??= _initAction(Dsn);
-                }
-            }
+        CaptureStructuredLog(loggingEvent);
 
-            var exception = loggingEvent.ExceptionObject ?? loggingEvent.MessageObject as Exception;
-            var evt = new SentryEvent(exception)
+        var exception = loggingEvent.ExceptionObject ?? loggingEvent.MessageObject as Exception;
+
+        if (MinimumEventLevel is not null && loggingEvent.Level < MinimumEventLevel)
+        {
+            AddBreadcrumbFromLoggingEvent(loggingEvent, exception);
+            return;
+        }
+
+        CreateSentryEvent(loggingEvent, exception);
+    }
+
+    private void CaptureStructuredLog(LoggingEvent loggingEvent)
+    {
+        var options = _hub.GetSentryOptions();
+        if (options is null)
+        {
+            return;
+        }
+
+        try
+        {
+            CaptureStructuredLog(_hub, options, loggingEvent, SendIdentity);
+        }
+        catch (Exception ex)
+        {
+            options.DiagnosticLogger?.LogError(ex, "Failed to capture structured log. The log will be dropped.");
+        }
+    }
+
+    private void CreateSentryEvent(LoggingEvent loggingEvent, Exception? exception)
+    {
+        var evt = new SentryEvent(exception)
+        {
+            Logger = loggingEvent.LoggerName,
+            Level = loggingEvent.ToSentryLevel()
+        };
+
+        if (Package is not null)
+        {
+            evt.Sdk.AddPackage(Package);
+        }
+
+        if (!string.IsNullOrWhiteSpace(loggingEvent.RenderedMessage))
+        {
+            evt.Message = loggingEvent.RenderedMessage;
+        }
+
+        evt.SetExtras(GetLoggingEventProperties(loggingEvent));
+
+        if (SendIdentity && !string.IsNullOrEmpty(loggingEvent.Identity))
+        {
+            evt.User = new SentryUser
             {
-                Logger = loggingEvent.LoggerName,
-                Level = loggingEvent.ToSentryLevel()
+                Id = loggingEvent.Identity
             };
-
-            if (evt.Sdk is {} sdk)
-            {
-                sdk.Name = Constants.SdkName;
-                sdk.Version = NameAndVersion.Version;
-
-                if (NameAndVersion.Version is {} version)
-                {
-                    sdk.AddPackage(ProtocolPackageName, version);
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(loggingEvent.RenderedMessage))
-            {
-                evt.Message = loggingEvent.RenderedMessage;
-            }
-
-            evt.SetExtras(GetLoggingEventProperties(loggingEvent));
-
-            if (SendIdentity && !string.IsNullOrEmpty(loggingEvent.Identity))
-            {
-                evt.User = new User
-                {
-                    Id = loggingEvent.Identity
-                };
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment))
-            {
-                evt.Environment = Environment;
-            }
-
-            _ = Hub.CaptureEvent(evt);
         }
 
-        private static IEnumerable<KeyValuePair<string, object?>> GetLoggingEventProperties(LoggingEvent loggingEvent)
+        _hub.CaptureEvent(evt);
+    }
+
+    private void AddBreadcrumbFromLoggingEvent(LoggingEvent loggingEvent, Exception? exception)
+    {
+        var message = !string.IsNullOrWhiteSpace(loggingEvent.RenderedMessage) ? loggingEvent.RenderedMessage : string.Empty;
+        var category = loggingEvent.LoggerName;
+        var level = loggingEvent.ToBreadcrumbLevel();
+        IDictionary<string, string> data = GetLoggingEventProperties(loggingEvent)
+            .Where(kvp => kvp.Value != null)
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value!.ToString() ?? "");
+
+        _hub.AddBreadcrumb(
+            clock: null,
+            message,
+            category,
+            type: null,
+            data,
+            level ?? default,
+            hint: exception.ToHint());
+        return;
+    }
+
+    private static IEnumerable<KeyValuePair<string, object?>> GetLoggingEventProperties(LoggingEvent loggingEvent)
+    {
+        var properties = loggingEvent.GetProperties();
+        if (properties == null)
         {
-            var properties = loggingEvent.GetProperties();
-            if (properties == null)
-            {
-                yield break;
-            }
+            yield break;
+        }
 
-            foreach (var key in properties.GetKeys())
+        foreach (var key in properties.GetKeys())
+        {
+            if (!string.IsNullOrWhiteSpace(key)
+                && !key.StartsWith("log4net:", StringComparison.OrdinalIgnoreCase))
             {
-                if (!string.IsNullOrWhiteSpace(key)
-                    && !key.StartsWith("log4net:", StringComparison.OrdinalIgnoreCase))
+                var value = properties[key];
+                if (value != null
+                    && (value is not string stringValue || !string.IsNullOrWhiteSpace(stringValue)))
                 {
-                    var value = properties[key];
-                    if (value != null
-                        && (!(value is string stringValue) || !string.IsNullOrWhiteSpace(stringValue)))
-                    {
-                        yield return new KeyValuePair<string, object?>(key, value);
-                    }
+                    yield return new KeyValuePair<string, object?>(key, value);
                 }
-            }
-
-            var locInfo = loggingEvent.LocationInformation;
-            if (locInfo != null)
-            {
-                if (!string.IsNullOrEmpty(locInfo.ClassName))
-                {
-                    yield return new KeyValuePair<string, object?>(nameof(locInfo.ClassName), locInfo.ClassName);
-                }
-
-                if (!string.IsNullOrEmpty(locInfo.FileName))
-                {
-                    yield return new KeyValuePair<string, object?>(nameof(locInfo.FileName), locInfo.FileName);
-                }
-
-                if (int.TryParse(locInfo.LineNumber, out var lineNumber) && lineNumber != 0)
-                {
-                    yield return new KeyValuePair<string, object?>(nameof(locInfo.LineNumber), lineNumber);
-                }
-
-                if (!string.IsNullOrEmpty(locInfo.MethodName))
-                {
-                    yield return new KeyValuePair<string, object?>(nameof(locInfo.MethodName), locInfo.MethodName);
-                }
-            }
-
-            if (!string.IsNullOrEmpty(loggingEvent.ThreadName))
-            {
-                yield return new KeyValuePair<string, object?>(nameof(loggingEvent.ThreadName), loggingEvent.ThreadName);
-            }
-
-            if (!string.IsNullOrEmpty(loggingEvent.Domain))
-            {
-                yield return new KeyValuePair<string, object?>(nameof(loggingEvent.Domain), loggingEvent.Domain);
-            }
-
-            if (loggingEvent.Level != null)
-            {
-                yield return new KeyValuePair<string, object?>("log4net-level", loggingEvent.Level.Name);
             }
         }
 
-        /// <summary>
-        /// Disposes the SDK if initialized.
-        /// </summary>
-        protected override void OnClose()
+        var locInfo = loggingEvent.LocationInformation;
+        if (locInfo != null)
         {
-            base.OnClose();
+            if (!string.IsNullOrEmpty(locInfo.ClassName))
+            {
+                yield return new KeyValuePair<string, object?>(nameof(locInfo.ClassName), locInfo.ClassName);
+            }
 
-            _sdkHandle?.Dispose();
+            if (!string.IsNullOrEmpty(locInfo.FileName))
+            {
+                yield return new KeyValuePair<string, object?>(nameof(locInfo.FileName), locInfo.FileName);
+            }
+
+            if (int.TryParse(locInfo.LineNumber, out var lineNumber) && lineNumber != 0)
+            {
+                yield return new KeyValuePair<string, object?>(nameof(locInfo.LineNumber), lineNumber);
+            }
+
+            if (!string.IsNullOrEmpty(locInfo.MethodName))
+            {
+                yield return new KeyValuePair<string, object?>(nameof(locInfo.MethodName), locInfo.MethodName);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(loggingEvent.ThreadName))
+        {
+            yield return new KeyValuePair<string, object?>(nameof(loggingEvent.ThreadName), loggingEvent.ThreadName);
+        }
+
+        if (!string.IsNullOrEmpty(loggingEvent.Domain))
+        {
+            yield return new KeyValuePair<string, object?>(nameof(loggingEvent.Domain), loggingEvent.Domain);
+        }
+
+        if (loggingEvent.Level != null)
+        {
+            yield return new KeyValuePair<string, object?>("log4net-level", loggingEvent.Level.Name);
         }
     }
 }

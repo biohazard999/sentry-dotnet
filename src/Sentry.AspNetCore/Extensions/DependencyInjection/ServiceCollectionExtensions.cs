@@ -1,36 +1,37 @@
-using System.ComponentModel;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Sentry;
 using Sentry.AspNetCore;
 using Sentry.Extensibility;
 using Sentry.Extensions.Logging.Extensions.DependencyInjection;
 
 // ReSharper disable once CheckNamespace -- Discoverability
-namespace Microsoft.Extensions.DependencyInjection
+namespace Microsoft.Extensions.DependencyInjection;
+
+/// <summary>
+/// Extension methods for <see cref="IServiceCollection"/>
+/// </summary>
+[EditorBrowsable(EditorBrowsableState.Never)]
+public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Extension methods for <see cref="IServiceCollection"/>
+    /// Adds Sentry's services to the <see cref="IServiceCollection"/>
     /// </summary>
-    [EditorBrowsable(EditorBrowsableState.Never)]
-    internal static class ServiceCollectionExtensions
+    /// <param name="services">The services.</param>
+    public static ISentryBuilder AddSentry(this IServiceCollection services)
     {
-        /// <summary>
-        /// Adds Sentry's services to the <see cref="IServiceCollection"/>
-        /// </summary>
-        /// <param name="services">The services.</param>
-        /// <returns></returns>
-        public static ISentryBuilder AddSentry(this IServiceCollection services)
-        {
-            services.AddSingleton<ISentryEventProcessor, AspNetCoreEventProcessor>();
-            services.TryAddSingleton<IUserFactory, DefaultUserFactory>();
+        services.AddSingleton<ISentryEventProcessor, AspNetCoreEventProcessor>();
+        services.AddSingleton<ISentryEventExceptionProcessor, AspNetCoreExceptionProcessor>();
 
-            services
-                    .AddSingleton<IRequestPayloadExtractor, FormRequestPayloadExtractor>()
-                    // Last
-                    .AddSingleton<IRequestPayloadExtractor, DefaultRequestPayloadExtractor>();
+        services.AddHttpContextAccessor();
+        services.TryAddSingleton<ISentryUserFactory, DefaultUserFactory>();
 
-            services.AddSentry<SentryAspNetCoreOptions>();
+        services
+            .AddSingleton<IRequestPayloadExtractor, FormRequestPayloadExtractor>()
+            // Last
+            .AddSingleton<IRequestPayloadExtractor, DefaultRequestPayloadExtractor>();
 
-            return new SentryAspNetCoreBuilder(services);
-        }
+        services.AddSentry<SentryAspNetCoreOptions>();
+
+        return new SentryAspNetCoreBuilder(services);
     }
 }

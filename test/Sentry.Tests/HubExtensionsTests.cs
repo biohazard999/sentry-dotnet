@@ -1,123 +1,307 @@
-using System;
-using System.Collections.Generic;
-using System.Collections.Immutable;
-using System.Linq;
-using NSubstitute;
-using Sentry.Infrastructure;
-using Sentry.Protocol;
-using Xunit;
+namespace Sentry.Tests;
 
-namespace Sentry.Tests
+public class HubExtensionsTests
 {
-    public class HubExtensionsTests
+    public IHub Sut { get; set; } = Substitute.For<IHub>();
+    public Scope Scope { get; set; } = new();
+
+    public HubExtensionsTests()
     {
-        public IHub Sut { get; set; } = Substitute.For<IHub>();
-        public Scope Scope { get; set; } = new();
+        Sut.SubstituteConfigureScope(Scope);
+    }
 
-        public HubExtensionsTests()
+    [Fact]
+    public void PushAndLockScope_PushesNewScope()
+    {
+        _ = Sut.PushAndLockScope();
+
+        _ = Sut.Received(1).PushScope();
+    }
+
+    [Fact]
+    public void PushAndLockScope_Disposed_DisposesInnerScope()
+    {
+        var disposable = Substitute.For<IDisposable>();
+        _ = Sut.PushScope().Returns(disposable);
+
+        var actual = Sut.PushAndLockScope();
+        actual.Dispose();
+
+        disposable.Received(1).Dispose();
+    }
+
+    [Fact]
+    public void PushAndLockScope_CreatedScopeIsLocked()
+    {
+        _ = Sut.PushAndLockScope();
+
+        Assert.True(Scope.Locked);
+    }
+
+    [Fact]
+    public void LockScope_LocksScope()
+    {
+        Sut.LockScope();
+
+        Assert.True(Scope.Locked);
+    }
+
+    [Fact]
+    public void UnlockScope_UnlocksScope()
+    {
+        Sut.LockScope();
+
+        Sut.UnlockScope();
+
+        Assert.False(Scope.Locked);
+    }
+
+    [Fact]
+    public void CaptureException_ScopeCallback_NoHandledArgument_DoesNotSetHandledFlag()
+    {
+        // Arrange
+        _ = Sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+
+        // Act
+        _ = Sut.CaptureException(ex, _ => { });
+
+        // Assert
+        Assert.False(ex.Data.Contains(Mechanism.HandledKey));
+        _ = Sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>(), Arg.Any<Action<Scope>>());
+    }
+
+    [Fact]
+    public void CaptureException_ScopeCallback_NoHandledArgument_PresetFlagIsPreserved()
+    {
+        // Arrange
+        _ = Sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+        ex.SetSentryMechanism("SomeMechanism", handled: false);
+
+        // Act
+        _ = Sut.CaptureException(ex, _ => { });
+
+        // Assert
+        Assert.Equal(false, ex.Data[Mechanism.HandledKey]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CaptureException_ScopeCallback_ExplicitHandled_RecordsFlagOnException(bool handled)
+    {
+        // Arrange
+        _ = Sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+
+        // Act
+        _ = Sut.CaptureException(ex, handled, terminal: false, _ => { });
+
+        // Assert
+        Assert.Equal(handled, ex.Data[Mechanism.HandledKey]);
+        _ = Sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>(), Arg.Any<Action<Scope>>());
+    }
+
+    [Fact]
+    public void CaptureException_ScopeCallback_ExplicitHandled_OverridesFlagSetBySetSentryMechanism()
+    {
+        // Arrange
+        _ = Sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+        ex.SetSentryMechanism("SomeMechanism", handled: true);
+
+        // Act
+        _ = Sut.CaptureException(ex, handled: false, terminal: false, _ => { });
+
+        // Assert
+        Assert.Equal(false, ex.Data[Mechanism.HandledKey]);
+    }
+
+    [Fact]
+    public void CaptureException_ScopeCallback_ExplicitHandled_DisabledHub_DoesNotRecordFlagOnException()
+    {
+        // Arrange
+        _ = Sut.IsEnabled.Returns(false);
+        var ex = new Exception();
+
+        // Act
+        var id = Sut.CaptureException(ex, handled: false, terminal: false, _ => { });
+
+        // Assert
+        Assert.Equal(SentryId.Empty, id);
+        Assert.False(ex.Data.Contains(Mechanism.HandledKey));
+        _ = Sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>(), Arg.Any<Action<Scope>>());
+    }
+
+    [Fact]
+    public void CaptureExceptionInternal_NoPresetFlag_DefaultsToUnhandled()
+    {
+        // Arrange
+        var ex = new Exception();
+
+        // Act
+        _ = Sut.CaptureExceptionInternal(ex);
+
+        // Assert
+        Assert.Equal(false, ex.Data[Mechanism.HandledKey]);
+        _ = Sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CaptureExceptionInternal_PresetFlag_IsNotOverwritten(bool handled)
+    {
+        // Arrange
+        // E.g. WinUIUnhandledExceptionIntegration forwards the platform's Handled value
+        // via SetSentryMechanism before capturing.
+        var ex = new Exception();
+        ex.SetSentryMechanism("SomeMechanism", handled: handled);
+
+        // Act
+        _ = Sut.CaptureExceptionInternal(ex);
+
+        // Assert
+        Assert.Equal(handled, ex.Data[Mechanism.HandledKey]);
+    }
+
+    [Fact]
+    public void AddBreadcrumb_MinimalArguments_CreatesBreadcrumb()
+    {
+        const string expectedMessage = "message";
+        Sut.AddBreadcrumb(expectedMessage);
+
+        _ = Assert.Single(Scope.Breadcrumbs);
+        var crumb = Scope.Breadcrumbs.Single();
+        Assert.Equal(expectedMessage, crumb.Message);
+        Assert.Null(crumb.Category);
+        Assert.Null(crumb.Data);
+        Assert.Null(crumb.Type);
+        Assert.Equal(BreadcrumbLevel.Info, crumb.Level);
+        Assert.NotEqual(default, crumb.Timestamp);
+    }
+
+    [Fact]
+    public void AddBreadcrumb_AllFields_CreatesBreadcrumb()
+    {
+        var expectedTimestamp = DateTimeOffset.MaxValue;
+        var clock = new MockClock(expectedTimestamp);
+
+        const string expectedMessage = "message";
+        const string expectedType = "type";
+        const string expectedCategory = "category";
+        var expectedData = new Dictionary<string, string>
         {
-            Sut.When(h => h.ConfigureScope(Arg.Any<Action<Scope>>()))
-                .Do(c => c.Arg<Action<Scope>>()(Scope));
-        }
+            {"Key", null},
+            {"Key2", "value2"},
+        };
+        const BreadcrumbLevel expectedLevel = BreadcrumbLevel.Fatal;
 
-        [Fact]
-        public void PushAndLockScope_PushesNewScope()
-        {
-            _ = Sut.PushAndLockScope();
+        Sut.AddBreadcrumb(
+            clock,
+            expectedMessage,
+            expectedCategory,
+            expectedType,
+            expectedData,
+            expectedLevel);
 
-            _ = Sut.Received(1).PushScope();
-        }
+        _ = Assert.Single(Scope.Breadcrumbs);
+        var crumb = Scope.Breadcrumbs.First();
 
-        [Fact]
-        public void PushAndLockScope_Disposed_DisposesInnerScope()
-        {
-            var disposable = Substitute.For<IDisposable>();
-            _ = Sut.PushScope().Returns(disposable);
+        Assert.Equal(expectedMessage, crumb.Message);
+        Assert.Equal(expectedType, crumb.Type);
+        Assert.Equal(expectedCategory, crumb.Category);
+        Assert.Equal(expectedLevel, crumb.Level);
+        Assert.Equal(expectedData.Count, crumb.Data.Count);
+        Assert.Equal(expectedData.ToImmutableDictionary(), crumb.Data);
+        Assert.Equal(expectedMessage, crumb.Message);
+        Assert.Equal(expectedTimestamp, crumb.Timestamp);
+    }
 
-            var actual = Sut.PushAndLockScope();
-            actual.Dispose();
+    [Fact]
+    public void GetTraceIdAndSpanId_WithActiveSpan_HasBothTraceIdAndSpanId()
+    {
+        // Arrange
+        var span = Substitute.For<ISpan>();
+        span.TraceId.Returns(SentryId.Create());
+        span.SpanId.Returns(Sentry.SpanId.Create());
 
-            disposable.Received(1).Dispose();
-        }
+        var hub = Substitute.For<IHub>();
+        hub.GetSpan().Returns(span);
 
-        [Fact]
-        public void PushAndLockScope_CreatedScopeIsLocked()
-        {
-            _ = Sut.PushAndLockScope();
+        // Act
+        hub.GetTraceIdAndSpanId(out var traceId, out var spanId);
 
-            Assert.True(Scope.Locked);
-        }
+        // Assert
+        traceId.Should().Be(span.TraceId);
+        spanId.Should().Be(span.SpanId);
+    }
 
-        [Fact]
-        public void LockScope_LocksScope()
-        {
-            Sut.LockScope();
+    [Fact]
+    public void GetTraceIdAndSpanId_WithoutActiveSpan_HasOnlyTraceIdButNoSpanId()
+    {
+        // Arrange
+        var hub = Substitute.For<IHub>();
+        hub.GetSpan().Returns((ISpan)null);
 
-            Assert.True(Scope.Locked);
-        }
+        var scope = new Scope();
+        hub.SubstituteConfigureScope(scope);
 
-        [Fact]
-        public void UnlockScope_UnlocksScope()
-        {
-            Sut.LockScope();
+        // Act
+        hub.GetTraceIdAndSpanId(out var traceId, out var spanId);
 
-            Sut.UnlockScope();
+        // Assert
+        traceId.Should().Be(scope.PropagationContext.TraceId);
+        spanId.Should().BeNull();
+    }
 
-            Assert.False(Scope.Locked);
-        }
+    [Fact]
+    public void GetTraceIdAndSpanId_WithoutIds_ShouldBeUnreachable()
+    {
+        // Arrange
+        var hub = Substitute.For<IHub>();
+        hub.GetSpan().Returns((ISpan)null);
 
-        [Fact]
-        public void AddBreadcrumb_MinimalArguments_CreatesBreadcrumb()
-        {
-            const string expectedMessage = "message";
-            Sut.AddBreadcrumb(expectedMessage);
+        // Act
+        hub.GetTraceIdAndSpanId(out var traceId, out var spanId);
 
-            _ = Assert.Single(Scope.Breadcrumbs);
-            var crumb = Scope.Breadcrumbs.Single();
-            Assert.Equal(expectedMessage, crumb.Message);
-            Assert.Null(crumb.Category);
-            Assert.Null(crumb.Data);
-            Assert.Null(crumb.Type);
-            Assert.Equal(BreadcrumbLevel.Info, crumb.Level);
-            Assert.NotEqual(default, crumb.Timestamp);
-        }
+        // Assert
+        traceId.Should().Be(SentryId.Empty);
+        spanId.Should().BeNull();
+    }
 
-        [Fact]
-        public void AddBreadcrumb_AllFields_CreatesBreadcrumb()
-        {
-            var expectedTimestamp = DateTimeOffset.MaxValue;
-            var clock = Substitute.For<ISystemClock>();
-            _ = clock.GetUtcNow().Returns(expectedTimestamp);
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CaptureException_ScopeCallback_ExplicitTerminal_RecordsTerminalFlagOnException(bool terminal)
+    {
+        // Arrange
+        _ = Sut.IsEnabled.Returns(true);
+        var ex = new Exception();
 
-            const string expectedMessage = "message";
-            const string expectedType = "type";
-            const string expectedCategory = "category";
-            var expectedData = new Dictionary<string, string>
-            {
-                {"Key", null},
-                {"Key2", "value2"},
-            };
-            const BreadcrumbLevel expectedLevel = BreadcrumbLevel.Critical;
+        // Act
+        _ = Sut.CaptureException(ex, handled: false, terminal, _ => { });
 
-            Sut.AddBreadcrumb(
-                clock,
-                expectedMessage,
-                expectedCategory,
-                expectedType,
-                expectedData,
-                expectedLevel);
+        // Assert
+        Assert.Equal(false, ex.Data[Mechanism.HandledKey]);
+        Assert.Equal(terminal, ex.Data[Mechanism.TerminalKey]);
+        _ = Sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>(), Arg.Any<Action<Scope>>());
+    }
 
-            _ = Assert.Single(Scope.Breadcrumbs);
-            var crumb = Scope.Breadcrumbs.First();
+    [Fact]
+    public void CaptureException_ScopeCallback_ExplicitTerminal_DisabledHub_DoesNotRecordFlagsOnException()
+    {
+        // Arrange
+        _ = Sut.IsEnabled.Returns(false);
+        var ex = new Exception();
 
-            Assert.Equal(expectedMessage, crumb.Message);
-            Assert.Equal(expectedType, crumb.Type);
-            Assert.Equal(expectedCategory, crumb.Category);
-            Assert.Equal(expectedLevel, crumb.Level);
-            Assert.Equal(expectedData.Count, crumb.Data.Count);
-            Assert.Equal(expectedData.ToImmutableDictionary(), crumb.Data);
-            Assert.Equal(expectedMessage, crumb.Message);
-            Assert.Equal(expectedTimestamp, crumb.Timestamp);
-        }
+        // Act
+        var id = Sut.CaptureException(ex, handled: false, terminal: true, _ => { });
+
+        // Assert
+        Assert.Equal(SentryId.Empty, id);
+        Assert.False(ex.Data.Contains(Mechanism.HandledKey));
+        Assert.False(ex.Data.Contains(Mechanism.TerminalKey));
     }
 }

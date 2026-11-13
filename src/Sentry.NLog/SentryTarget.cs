@@ -1,488 +1,521 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
+namespace Sentry.NLog;
 
-using NLog;
-using NLog.Common;
-using NLog.Config;
-using NLog.Layouts;
-using NLog.Targets;
-
-using Sentry.Extensibility;
-using Sentry.Infrastructure;
-using Sentry.Protocol;
-using Sentry.Reflection;
-
-namespace Sentry.NLog
+/// <summary>
+/// Sentry NLog Target.
+/// </summary>
+[Target("Sentry")]
+public sealed partial class SentryTarget : TargetWithContext
 {
+    private static readonly SentryPackage? Package = typeof(SentryTarget).Assembly.GetNuGetPackage();
+
+    // For testing:
+    internal Func<IHub> HubAccessor { get; }
+
+    private readonly ISystemClock _clock;
+    private readonly UninitializedSdkWarning _uninitializedSdkWarning;
+    private bool _reportedUnsupportedSdkSetting;
+
+    internal Action<string> WriteToStandardError { get; set; } = Console.Error.WriteLine;
+
+    internal static readonly string AdditionalGroupingKeyProperty = "AdditionalGroupingKey";
+
+    internal const string UninitializedSdkMessage =
+        "Sentry: the Sentry target for NLog dropped a log event because Sentry is not initialized, but a DSN " +
+        "was found in the environment or in an assembly attribute. The target no longer initializes the SDK: " +
+        "call SentrySdk.Init (or UseSentry via one of the integrations) at startup. " +
+        "See https://docs.sentry.io/platforms/dotnet/guides/nlog/";
+
     /// <summary>
-    /// Sentry NLog Target.
+    /// Creates a new instance of <see cref="SentryTarget"/>.
     /// </summary>
-    [Target("Sentry")]
-    public sealed class SentryTarget : TargetWithContext
+    public SentryTarget() : this(new SentryNLogOptions())
     {
-        // For testing:
-        internal Func<IHub> HubAccessor { get; }
+    }
 
-        private readonly ISystemClock _clock;
-        private IDisposable? _sdkDisposable;
+    /// <summary>
+    /// Creates a new instance of <see cref="SentryTarget"/>.
+    /// </summary>
+    public SentryTarget(SentryNLogOptions options)
+        : this(
+            options,
+            () => HubAdapter.Instance,
+            SystemClock.Clock)
+    {
+    }
 
-        internal static readonly SdkVersion NameAndVersion = typeof(SentryTarget).Assembly.GetNameAndVersion();
+    internal SentryTarget(
+        SentryNLogOptions options,
+        Func<IHub> hubAccessor,
+        ISystemClock clock,
+        UninitializedSdkWarning? uninitializedSdkWarning = null)
+    {
+        Options = options;
+        HubAccessor = hubAccessor;
+        _clock = clock;
+        _uninitializedSdkWarning = uninitializedSdkWarning
+                                   ?? new UninitializedSdkWarning(message => InternalLogger.Warn("{0}", message));
 
-        internal static readonly string AdditionalGroupingKeyProperty = "AdditionalGroupingKey";
+        // Overrides default layout. Still will be explicitly overwritten if manually configured in the
+        // NLog.config file.
+        Layout = "${message}";
+        BreadcrumbCategory = Options.BreadcrumbCategoryLayout ?? "${logger}";
+        IncludeEventProperties = true;
+    }
 
-        private static readonly string ProtocolPackageName = "nuget:" + NameAndVersion.Name;
+    /// <summary>
+    /// Options for the <see cref="SentryTarget"/>.
+    /// </summary>
+    public SentryNLogOptions Options { get; }
 
-        /// <summary>
-        /// Creates a new instance of <see cref="SentryTarget"/>.
-        /// </summary>
-        public SentryTarget() : this(new SentryNLogOptions())
+    /// <summary>
+    /// Add any desired additional tags that will be sent with every message.
+    /// </summary>
+    [ArrayParameter(typeof(TargetPropertyWithContext), "tag")]
+    public IList<TargetPropertyWithContext> Tags => Options.Tags;
+
+    /// <summary>
+    /// Not supported. The Sentry target no longer initializes the SDK.
+    /// </summary>
+    /// <exception cref="NotSupportedException">When set.</exception>
+    [Obsolete(ConfigurationExtensions.ObsoleteDsnOverload, error: true)]
+    public Layout? Dsn
+    {
+        get => null;
+        set => throw ReportUnsupportedSdkSetting();
+    }
+
+    /// <summary>
+    /// Not supported. The Sentry target no longer initializes the SDK.
+    /// </summary>
+    /// <exception cref="NotSupportedException">When set.</exception>
+    [Obsolete(ConfigurationExtensions.ObsoleteDsnOverload, error: true)]
+    public bool InitializeSdk
+    {
+        get => false;
+        set
         {
-        }
-
-        /// <summary>
-        /// Creates a new instance of <see cref="SentryTarget"/>.
-        /// </summary>
-        public SentryTarget(SentryNLogOptions options)
-            : this(
-                options,
-                () => HubAdapter.Instance,
-                null,
-                SystemClock.Clock)
-        {
-        }
-
-        internal SentryTarget(SentryNLogOptions options, Func<IHub> hubAccessor, IDisposable? sdkInstance, ISystemClock clock)
-        {
-            Options = options;
-            HubAccessor = hubAccessor;
-            _clock = clock;
-
-            // Overrides default layout. Still will be explicitly overwritten if manually configured in the
-            // NLog.config file.
-            Layout = "${message}";
-            BreadcrumbCategory = Options.BreadcrumbCategoryLayout ?? "${logger}";
-            IncludeEventProperties = true;
-
-            if (sdkInstance != null)
+            if (value)
             {
-                _sdkDisposable = sdkInstance;
+                throw ReportUnsupportedSdkSetting();
+            }
+        }
+    }
+
+    /// <summary>
+    /// An optional layout specific to breadcrumbs. If not set, uses the same layout as the standard <see cref="TargetWithContext.Layout"/>.
+    /// </summary>
+    public Layout? BreadcrumbLayout
+    {
+        get => Options.BreadcrumbLayout ?? Layout;
+        set => Options.BreadcrumbLayout = value;
+    }
+
+    /// <summary>
+    /// Configured layout for application Environment to Sentry
+    /// </summary>
+    public Layout? BreadcrumbCategory
+    {
+        get => Options.BreadcrumbCategoryLayout;
+        set => Options.BreadcrumbCategoryLayout = value;
+    }
+
+    /// <summary>
+    /// Minimum log level for events to trigger a send to Sentry. Defaults to <see cref="M:LogLevel.Error" />.
+    /// </summary>
+    public string MinimumEventLevel
+    {
+        get => Options.MinimumEventLevel?.ToString() ?? LogLevel.Off.ToString();
+        set => Options.MinimumEventLevel = LogLevel.FromString(value);
+    }
+
+    /// <summary>
+    /// Minimum log level to be included in the breadcrumb. Defaults to <see cref="M:LogLevel.Info" />.
+    /// </summary>
+    public string MinimumBreadcrumbLevel
+    {
+        get => Options.MinimumBreadcrumbLevel?.ToString() ?? LogLevel.Off.ToString();
+        set => Options.MinimumBreadcrumbLevel = LogLevel.FromString(value);
+    }
+
+    /// <summary>
+    /// Minimum log level to be sent to Sentry as a structured log. Defaults to <see cref="M:LogLevel.Info" />.
+    /// </summary>
+    public string MinimumLogLevel
+    {
+        get => Options.MinimumLogLevel?.ToString() ?? LogLevel.Off.ToString();
+        set => Options.MinimumLogLevel = LogLevel.FromString(value);
+    }
+
+    internal const string ObsoleteEnableLogs =
+        "Use MinimumLogLevel instead. Setting this to false is the same as setting MinimumLogLevel to Off. " +
+        "This option will be removed in a future major version.";
+
+    /// <summary>
+    /// Setting this to <see langword="false"/> sets <see cref="MinimumLogLevel"/> to <c>Off</c>.
+    /// </summary>
+    /// <remarks>
+    /// Setting it to <see langword="true"/> has no effect. Use <see cref="MinimumLogLevel"/> instead.
+    /// </remarks>
+    [Obsolete(ObsoleteEnableLogs)]
+    public bool EnableLogs
+    {
+        get => Options.MinimumLogLevel is { } level && level != LogLevel.Off;
+        set
+        {
+            if (!value)
+            {
+                Options.MinimumLogLevel = LogLevel.Off;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Set this to <see langword="true" /> to ignore log messages that don't contain an exception.
+    /// </summary>
+    public bool IgnoreEventsWithNoException
+    {
+        get => Options.IgnoreEventsWithNoException;
+        set => Options.IgnoreEventsWithNoException = value;
+    }
+
+    /// <summary>
+    /// Determines whether event properties will be sent to sentry as Tags or not.
+    /// Defaults to <see langword="false" />.
+    /// </summary>
+    public bool IncludeEventPropertiesAsTags
+    {
+        get => Options.IncludeEventPropertiesAsTags;
+        set => Options.IncludeEventPropertiesAsTags = value;
+    }
+
+    /// <summary>
+    /// Determines whether or not to include event-level data as data in breadcrumbs for future errors.
+    /// Defaults to <see langword="false" />.
+    /// </summary>
+    public bool IncludeEventDataOnBreadcrumbs
+    {
+        get => Options.IncludeEventDataOnBreadcrumbs;
+        set => Options.IncludeEventDataOnBreadcrumbs = value;
+    }
+
+    /// <summary>
+    /// Optionally configure one or more parts of the user information to be rendered dynamically from an NLog layout
+    /// </summary>
+    public SentryNLogUser? User
+    {
+        get => Options.User;
+        set => Options.User = value;
+    }
+
+    // NLog discards the exception unless throwConfigExceptions is on. Report once: a v6 config may set both.
+    private NotSupportedException ReportUnsupportedSdkSetting()
+    {
+        if (!_reportedUnsupportedSdkSetting)
+        {
+            _reportedUnsupportedSdkSetting = true;
+            WriteToStandardError("Sentry: " + ConfigurationExtensions.ObsoleteDsnOverload);
+        }
+
+        return new NotSupportedException(ConfigurationExtensions.ObsoleteDsnOverload);
+    }
+
+    /// <inheritdoc />
+    protected override void InitializeTarget()
+    {
+        // If a layout has been configured on the options, replace the default logger.
+        if (Options.Layout != null)
+        {
+            Layout = Options.Layout;
+        }
+
+        base.InitializeTarget();
+
+        if (!HubAccessor().IsEnabled)
+        {
+            InternalLogger.Info("Sentry(Name={0}): Hub not enabled", Name);
+        }
+    }
+
+    /// <inheritdoc />
+    protected override void FlushAsync(AsyncContinuation asyncContinuation)
+    {
+        _ = HubAccessor()
+            .FlushAsync()
+            .ContinueWith(t => asyncContinuation(t.Exception));
+    }
+
+    private static AsyncLocal<bool> isReentrant = new();
+    /// <summary>
+    /// <para>
+    /// If the event level &gt;= the <see cref="MinimumEventLevel"/>, the
+    /// <paramref name="logEvent"/> is captured as an event by sentry.
+    /// </para>
+    /// <para>
+    /// If the event level is &gt;= the <see cref="MinimumBreadcrumbLevel"/>, the event is added
+    /// as a breadcrumb to the Sentry Sdk.
+    /// </para>
+    /// <para>
+    /// If the event level is &gt;= the <see cref="MinimumLogLevel"/>, the event is sent as a structured log.
+    /// </para>
+    /// <para>
+    /// If sentry is not enabled, this is a No-op.
+    /// </para>
+    /// </summary>
+    /// <param name="logEvent">The event that is being logged.</param>
+    /// <inheritdoc />
+    protected override void Write(LogEventInfo logEvent)
+    {
+        //TODO: check if can really be null
+        // ReSharper disable once ConditionIsAlwaysTrueOrFalseAccordingToNullableAPIContract
+        if (logEvent == null)
+        {
+            return;
+        }
+
+        // Must precede the reentrancy check below to avoid an infinite recursion
+        if (SentrySdkNamespaces.IsSentrySdk(logEvent.LoggerName))
+        {
+            return;
+        }
+
+        if (isReentrant.Value)
+        {
+            HubAccessor()?.GetSentryOptions()?.DiagnosticLogger?.LogError($"Reentrant log event detected. Logging when inside the scope of another log event can cause a StackOverflowException. LogEventInfo.Message:{logEvent.Message}");
+            return;
+        }
+
+        isReentrant.Value = true;
+
+        try
+        {
+            InnerWrite(logEvent);
+        }
+        catch (Exception exception)
+        {
+            HubAccessor()?.GetSentryOptions()?.DiagnosticLogger?.LogError(exception, "Failed to write log event");
+            throw;
+        }
+        finally
+        {
+            isReentrant.Value = false;
+        }
+    }
+
+    private void InnerWrite(LogEventInfo logEvent)
+    {
+        if (logEvent.Message == null)
+        {
+            return;
+        }
+
+        var hub = HubAccessor();
+        if (!hub.IsEnabled)
+        {
+            if (logEvent.Level >= Options.MinimumEventLevel)
+            {
+                _uninitializedSdkWarning.WarnOnce(UninitializedSdkMessage);
+            }
+
+            return;
+        }
+
+        var exception = logEvent.Exception;
+        var shouldIgnoreEvent = exception == null && IgnoreEventsWithNoException;
+        var shouldIncludeProperties = ContextProperties?.Count > 0 || ShouldIncludeProperties(logEvent);
+        var addedBreadcrumbForException = false;
+
+        if (logEvent.Level >= Options.MinimumEventLevel && !shouldIgnoreEvent)
+        {
+            CreateSentryEvent(logEvent, exception, shouldIncludeProperties, hub);
+
+            // Capturing exception events adds a breadcrumb automatically... we don't want to add another one
+            if (exception != null)
+            {
+                addedBreadcrumbForException = true;
             }
         }
 
-        /// <summary>
-        /// Options for both the <see cref="SentryTarget"/> and the sentry sdk itself.
-        /// </summary>
-        [Advanced]
-        public SentryNLogOptions Options { get; }
-
-        /// <summary>
-        /// Add any desired additional tags that will be sent with every message.
-        /// </summary>
-        [ArrayParameter(typeof(TargetPropertyWithContext), "tag")]
-        public IList<TargetPropertyWithContext> Tags => Options.Tags;
-
-        /// <summary>
-        /// Configured layout for Data Source Name of a given project in Sentry
-        /// </summary>
-        public Layout? Dsn
+        // Whether or not it was sent as an event, add breadcrumb so the next event includes it
+        if (!addedBreadcrumbForException && logEvent.Level >= Options.MinimumBreadcrumbLevel)
         {
-            get => Options.DsnLayout;
-            set => Options.DsnLayout = value;
+            CreateBreadcrumb(logEvent, exception, shouldIncludeProperties, hub);
         }
 
-        /// <summary>
-        /// Configured layout for application Release version to Sentry
-        /// </summary>
-        public Layout? Release
+        var sentryOptions = hub.GetSentryOptions();
+        if (sentryOptions is not null && logEvent.Level >= Options.MinimumLogLevel)
         {
-            get => Options.ReleaseLayout;
-            set => Options.ReleaseLayout = value;
-        }
-
-        /// <summary>
-        /// Configured layout for application Environment to Sentry
-        /// </summary>
-        public Layout? Environment
-        {
-            get => Options.EnvironmentLayout;
-            set => Options.EnvironmentLayout = value;
-        }
-
-        /// <summary>
-        /// An optional layout specific to breadcrumbs. If not set, uses the same layout as the standard <see cref="TargetWithContext.Layout"/>.
-        /// </summary>
-        public Layout? BreadcrumbLayout
-        {
-            get => Options.BreadcrumbLayout ?? Layout;
-            set => Options.BreadcrumbLayout = value;
-        }
-
-        /// <summary>
-        /// Configured layout for application Environment to Sentry
-        /// </summary>
-        public Layout? BreadcrumbCategory
-        {
-            get => Options.BreadcrumbCategoryLayout;
-            set => Options.BreadcrumbCategoryLayout = value;
-        }
-
-        /// <summary>
-        /// Minimum log level for events to trigger a send to Sentry. Defaults to <see cref="M:LogLevel.Error" />.
-        /// </summary>
-        public string MinimumEventLevel
-        {
-            get => Options.MinimumEventLevel?.ToString() ?? LogLevel.Off.ToString();
-            set => Options.MinimumEventLevel = LogLevel.FromString(value);
-        }
-
-        /// <summary>
-        /// Minimum log level to be included in the breadcrumb. Defaults to <see cref="M:LogLevel.Info" />.
-        /// </summary>
-        public string MinimumBreadcrumbLevel
-        {
-            get => Options.MinimumBreadcrumbLevel?.ToString() ?? LogLevel.Off.ToString();
-            set => Options.MinimumBreadcrumbLevel = LogLevel.FromString(value);
-        }
-
-        /// <summary>
-        /// Whether the NLog integration should initialize the SDK.
-        /// </summary>
-        /// <remarks>
-        /// By default, if a DSN is provided to the NLog integration it will initialize the SDK.
-        /// This might be not ideal when using multiple integrations in case you want another one doing the Init.
-        /// </remarks>
-        public bool InitializeSdk
-        {
-            get => Options.InitializeSdk;
-            set => Options.InitializeSdk = value;
-        }
-
-        /// <summary>
-        /// Set this to <see langword="true" /> to ignore log messages that don't contain an exception.
-        /// </summary>
-        public bool IgnoreEventsWithNoException
-        {
-            get => Options.IgnoreEventsWithNoException;
-            set => Options.IgnoreEventsWithNoException = value;
-        }
-
-        /// <summary>
-        /// Determines whether event properties will be sent to sentry as Tags or not.
-        /// Defaults to <see langword="false" />.
-        /// </summary>
-        public bool IncludeEventPropertiesAsTags
-        {
-            get => Options.IncludeEventPropertiesAsTags;
-            set => Options.IncludeEventPropertiesAsTags = value;
-        }
-
-        /// <summary>
-        /// Determines whether or not to include event-level data as data in breadcrumbs for future errors.
-        /// Defaults to <see langword="false" />.
-        /// </summary>
-        public bool IncludeEventDataOnBreadcrumbs
-        {
-            get => Options.IncludeEventDataOnBreadcrumbs;
-            set => Options.IncludeEventDataOnBreadcrumbs = value;
-        }
-
-        /// <summary>
-        /// How many seconds to wait after triggering <see cref="LogManager.Shutdown()"/> before just shutting down the
-        /// Sentry sdk.
-        /// </summary>
-        public int ShutdownTimeoutSeconds
-        {
-            get => Options.ShutdownTimeoutSeconds;
-            set => Options.ShutdownTimeoutSeconds = value;
-        }
-
-        /// <summary>
-        /// How long to wait for the flush to finish, in seconds. Defaults to 2 seconds.
-        /// </summary>
-        public int FlushTimeoutSeconds
-        {
-            get => (int)Options.FlushTimeout.TotalSeconds;
-            set => Options.FlushTimeout = TimeSpan.FromSeconds(value);
-        }
-
-        /// <summary>
-        /// Optionally configure one or more parts of the user information to be rendered dynamically from an NLog layout
-        /// </summary>
-        public SentryNLogUser? User
-        {
-            get => Options.User;
-            set => Options.User = value;
-        }
-
-        /// <inheritdoc />
-        protected override void CloseTarget()
-        {
-            _sdkDisposable?.Dispose();
-            base.CloseTarget();
-        }
-
-        /// <inheritdoc />
-        protected override void InitializeTarget()
-        {
-            // If a layout has been configured on the options, replace the default logger.
-            if (Options.Layout != null)
+            try
             {
-                Layout = Options.Layout;
+                CaptureStructuredLog(hub, sentryOptions, logEvent);
             }
-
-            base.InitializeTarget();
-
-            if (InternalLogger.IsDebugEnabled || InternalLogger.IsInfoEnabled || InternalLogger.IsWarnEnabled || InternalLogger.IsErrorEnabled || InternalLogger.IsFatalEnabled)
+            catch (Exception ex)
             {
-                var existingLogger = Options.DiagnosticLogger;
-                if (!(existingLogger is NLogDiagnosticLogger))
-                {
-                    Options.DiagnosticLogger = new NLogDiagnosticLogger(existingLogger);
-                }
-                Options.Debug = true;
-            }
-
-            var customDsn = Dsn?.Render(LogEventInfo.CreateNullEvent());
-            if (!string.IsNullOrEmpty(customDsn))
-            {
-                Options.Dsn = customDsn;
-            }
-
-            var customRelease = Release?.Render(LogEventInfo.CreateNullEvent());
-            if (!string.IsNullOrEmpty(customRelease))
-            {
-                Options.Release = customRelease;
-            }
-
-            var customEnvironment = Environment?.Render(LogEventInfo.CreateNullEvent());
-            if (!string.IsNullOrEmpty(customEnvironment))
-            {
-                Options.Environment = customEnvironment;
-            }
-
-            // If the sdk is not there, set it on up.
-            if (InitializeSdk && _sdkDisposable == null)
-            {
-                _sdkDisposable = SentrySdk.Init(Options);
-            }
-
-            if (!HubAccessor().IsEnabled)
-            {
-                InternalLogger.Info("Sentry(Name={0}): Hub not enabled", Name);
+                sentryOptions.DiagnosticLogger?.LogError(ex, "Failed to capture structured log. The log will be dropped.");
             }
         }
+    }
 
-        /// <inheritdoc />
-        protected override void FlushAsync(AsyncContinuation asyncContinuation)
+    private void CreateBreadcrumb(LogEventInfo logEvent, Exception? exception, bool shouldIncludeProperties, IHub hub)
+    {
+        var breadcrumbFormatted = RenderLogEvent(BreadcrumbLayout, logEvent);
+        var breadcrumbCategory = RenderLogEvent(BreadcrumbCategory, logEvent);
+        if (string.IsNullOrEmpty(breadcrumbCategory))
         {
-            _ = HubAccessor()
-                    .FlushAsync(Options.FlushTimeout)
-                    .ContinueWith(t => asyncContinuation(t.Exception));
+            breadcrumbCategory = null;
         }
 
-        /// <summary>
-        /// <para>
-        /// If the event level &gt;= the <see cref="MinimumEventLevel"/>, the
-        /// <paramref name="logEvent"/> is captured as an event by sentry.
-        /// </para>
-        /// <para>
-        /// If the event level is &gt;= the <see cref="MinimumBreadcrumbLevel"/>, the event is added
-        /// as a breadcrumb to the Sentry Sdk.
-        /// </para>
-        /// <para>
-        /// If sentry is not enabled, this is a No-op.
-        /// </para>
-        /// </summary>
-        /// <param name="logEvent">The event that is being logged.</param>
-        /// <inheritdoc />
-        protected override void Write(LogEventInfo logEvent)
+        var message = string.IsNullOrWhiteSpace(breadcrumbFormatted)
+            ? exception?.Message ?? logEvent.FormattedMessage
+            : breadcrumbFormatted;
+
+        IDictionary<string, string>? data = null;
+        // If this is true, an exception is being logged with no custom message
+        if (exception?.Message != null && !message.StartsWith(exception.Message))
         {
-            if (logEvent?.Message == null)
+            // Exception won't be used as Breadcrumb message. Avoid losing it by adding as data:
+            data = new Dictionary<string, string>
             {
-                return;
-            }
-
-            var hub = HubAccessor();
-
-            if (!hub.IsEnabled)
-            {
-                return;
-            }
-
-            var exception = logEvent.Exception;
-            var shouldOnlyLogExceptions = exception == null && IgnoreEventsWithNoException;
-            var shouldIncludeProperties = ContextProperties?.Count > 0 || ShouldIncludeProperties(logEvent);
-
-            if (logEvent.Level >= Options.MinimumEventLevel && !shouldOnlyLogExceptions)
-            {
-                var formatted = RenderLogEvent(Layout, logEvent);
-                var template = logEvent.Message;
-
-                var evt = new SentryEvent(exception)
-                {
-                    Message = new SentryMessage
-                    {
-                        Formatted = formatted,
-                        Message = template
-                    },
-                    Logger = logEvent.LoggerName,
-                    Level = logEvent.Level.ToSentryLevel(),
-                    Release = Options.Release,
-                    Environment = Options.Environment,
-                    User = GetUser(logEvent) ?? new User(),
-                };
-
-                if (evt.Sdk is {} sdk)
-                {
-                    sdk.Name = Constants.SdkName;
-                    sdk.Version = NameAndVersion.Version;
-
-                    if (NameAndVersion.Version is {} version)
-                    {
-                        sdk.AddPackage(ProtocolPackageName, version);
-                    }
-                }
-
-                if (Tags.Count > 0 || IncludeEventPropertiesAsTags && logEvent.HasProperties)
-                {
-                    evt.SetTags(GetTagsFromLogEvent(logEvent));
-                }
-
-                if (shouldIncludeProperties)
-                {
-                    var contextProps = GetAllProperties(logEvent);
-                    evt.SetExtras(contextProps);
-
-                    if (contextProps.TryGetValue(AdditionalGroupingKeyProperty, out var additionalGroupingKey)
-                        && additionalGroupingKey is string groupingKey)
-                    {
-                        var overridenFingerprint = evt.Fingerprint.ToList();
-                        if (!evt.Fingerprint.Any())
-                        {
-                            overridenFingerprint.Add("{{ default }}");
-                        }
-                        overridenFingerprint.Add(groupingKey);
-
-                        evt.SetFingerprint(overridenFingerprint);
-                    }
-                }
-
-                _ = hub.CaptureEvent(evt);
-            }
-
-            // Whether or not it was sent as event, add breadcrumb so the next event includes it
-            if (logEvent.Level >= Options.MinimumBreadcrumbLevel)
-            {
-                var breadcrumbFormatted = RenderLogEvent(BreadcrumbLayout, logEvent);
-                string? breadcrumbCategory = RenderLogEvent(BreadcrumbCategory, logEvent);
-                if (string.IsNullOrEmpty(breadcrumbCategory))
-                {
-                    breadcrumbCategory = null;
-                }
-
-                var message = string.IsNullOrWhiteSpace(breadcrumbFormatted)
-                    ? exception?.Message ?? logEvent.FormattedMessage
-                    : breadcrumbFormatted;
-
-                IDictionary<string, string>? data = null;
-                // If this is true, an exception is being logged with no custom message
-                if (exception?.Message != null && !message.StartsWith(exception.Message))
-                {
-                    // Exception won't be used as Breadcrumb message. Avoid losing it by adding as data:
-                    data = new Dictionary<string, string>
-                        {
-                            { "exception_type", exception.GetType().ToString() },
-                            { "exception_message", exception.Message },
-                        };
-                }
-
-                if (IncludeEventDataOnBreadcrumbs)
-                {
-                    if (shouldIncludeProperties)
-                    {
-                        var contextProps = GetAllProperties(logEvent);
-                        data ??= new Dictionary<string, string>(contextProps.Count);
-                        foreach (var contextProp in contextProps)
-                        {
-                            if (contextProp.Value?.ToString() is {} value)
-                            {
-                                data.Add(contextProp.Key, value);
-                            }
-                        }
-                    }
-                }
-
-                hub.AddBreadcrumb(
-                    _clock,
-                    message,
-                    breadcrumbCategory,
-                    data: data,
-                    level: logEvent.Level.ToBreadcrumbLevel());
-            }
-        }
-
-        private User? GetUser(LogEventInfo logEvent)
-        {
-            if (User is null)
-            {
-                return null;
-            }
-
-            var user = new User
-            {
-                Email = User.Email?.Render(logEvent),
-                Id = User.Id?.Render(logEvent),
-                IpAddress = User.IpAddress?.Render(logEvent),
-                Username = User.Username?.Render(logEvent),
+                {"exception_type", exception.GetType().ToString()},
+                {"exception_message", exception.Message},
             };
-
-            if (User.Other?.Count > 0)
-            {
-                user.Other = new Dictionary<string, string>(User.Other.Count);
-                for (var i = 0; i < User.Other.Count; ++i)
-                {
-                    if (User.Other[i].Layout?.Render(logEvent) is {} value)
-                    {
-                        if (!string.IsNullOrEmpty(value) || User.Other[i].IncludeEmptyValue)
-                        {
-                            user.Other[User.Other[i].Name] = value;
-                        }
-                    }
-                }
-            }
-
-            return user;
         }
 
-        private IEnumerable<KeyValuePair<string, string>> GetTagsFromLogEvent(LogEventInfo logEvent)
+        if (IncludeEventDataOnBreadcrumbs)
         {
-            if (IncludeEventPropertiesAsTags)
+            if (shouldIncludeProperties)
             {
-                if (logEvent.HasProperties)
+                var contextProps = GetAllProperties(logEvent);
+                data ??= new Dictionary<string, string>(contextProps.Count);
+                foreach (var contextProp in contextProps)
                 {
-                    foreach (var kv in logEvent.Properties)
+                    if (contextProp.Value?.ToString() is { } value)
                     {
-                        if (kv.Value?.ToString() is {} value)
-                        {
-                            yield return new KeyValuePair<string, string>(kv.Key?.ToString() ?? "", value);
-                        }
+                        data.Add(contextProp.Key, value);
                     }
                 }
             }
+        }
 
-            if (Tags.Count > 0)
+        hub.AddBreadcrumb(
+            _clock,
+            message,
+            breadcrumbCategory,
+            type: null,
+            data: data,
+            level: logEvent.Level.ToBreadcrumbLevel(),
+            hint: exception.ToHint());
+    }
+
+    private void CreateSentryEvent(LogEventInfo logEvent, Exception? exception, bool shouldIncludeProperties, IHub hub)
+    {
+        var formatted = RenderLogEvent(Layout, logEvent);
+        var template = logEvent.Message;
+
+        var evt = new SentryEvent(exception)
+        {
+            Message = new SentryMessage
             {
-                foreach (var tag in Tags)
-                {
-                    var tagValue = RenderLogEvent(tag.Layout, logEvent);
-                    if (!tag.IncludeEmptyValue && string.IsNullOrEmpty(tagValue))
-                    {
-                        continue;
-                    }
+                Formatted = formatted,
+                Message = template
+            },
+            Logger = logEvent.LoggerName,
+            Level = logEvent.Level.ToSentryLevel(),
+            User = GetUser(logEvent) ?? new SentryUser(),
+        };
 
-                    yield return new KeyValuePair<string, string>(tag.Name, tagValue);
+        if (Package is not null)
+        {
+            evt.Sdk.AddPackage(Package);
+        }
+
+        if (Tags.Count > 0 || IncludeEventPropertiesAsTags && logEvent.HasProperties)
+        {
+            evt.SetTags(GetTagsFromLogEvent(logEvent));
+        }
+
+        if (shouldIncludeProperties)
+        {
+            var contextProps = GetAllProperties(logEvent);
+            evt.SetExtras(contextProps);
+
+            if (contextProps.TryGetValue(AdditionalGroupingKeyProperty, out var additionalGroupingKey)
+                && additionalGroupingKey is string groupingKey)
+            {
+                var overridenFingerprint = evt.Fingerprint.ToList();
+                if (!evt.Fingerprint.Any())
+                {
+                    overridenFingerprint.Add("{{ default }}");
                 }
+
+                overridenFingerprint.Add(groupingKey);
+
+                evt.SetFingerprint(overridenFingerprint);
+            }
+        }
+
+        _ = hub.CaptureEvent(evt);
+    }
+
+    private SentryUser? GetUser(LogEventInfo logEvent)
+    {
+        if (User is null)
+        {
+            return null;
+        }
+
+        var user = new SentryUser
+        {
+            Id = User.Id?.Render(logEvent),
+            Username = User.Username?.Render(logEvent),
+            Email = User.Email?.Render(logEvent),
+            IpAddress = User.IpAddress?.Render(logEvent),
+        };
+
+        if (User.Other?.Count > 0)
+        {
+            user.Other = new Dictionary<string, string>(User.Other.Count);
+            for (var i = 0; i < User.Other.Count; ++i)
+            {
+                if (User.Other[i].Layout?.Render(logEvent) is { } value)
+                {
+                    if (!string.IsNullOrEmpty(value) || User.Other[i].IncludeEmptyValue)
+                    {
+                        user.Other[User.Other[i].Name] = value;
+                    }
+                }
+            }
+        }
+
+        return user;
+    }
+
+    private IEnumerable<KeyValuePair<string, string>> GetTagsFromLogEvent(LogEventInfo logEvent)
+    {
+        if (IncludeEventPropertiesAsTags)
+        {
+            if (logEvent.HasProperties)
+            {
+                foreach (var kv in logEvent.Properties)
+                {
+                    if (kv.Value?.ToString() is { } value)
+                    {
+                        yield return new KeyValuePair<string, string>(kv.Key?.ToString() ?? "", value);
+                    }
+                }
+            }
+        }
+
+        if (Tags.Count > 0)
+        {
+            foreach (var tag in Tags)
+            {
+                var tagValue = RenderLogEvent(tag.Layout, logEvent);
+                if (!tag.IncludeEmptyValue && string.IsNullOrEmpty(tagValue))
+                {
+                    continue;
+                }
+
+                yield return new KeyValuePair<string, string>(tag.Name, tagValue);
             }
         }
     }

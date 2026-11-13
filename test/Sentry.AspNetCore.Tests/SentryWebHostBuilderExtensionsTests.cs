@@ -1,81 +1,183 @@
-using System;
-using System.Collections.Generic;
-#if NETCOREAPP2_1 || NET461
-using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IHostingEnvironment;
-#else
-using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IWebHostEnvironment;
-#endif
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using NSubstitute;
-using Xunit;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Sentry.Extensions.Logging;
 
-namespace Sentry.AspNetCore.Tests
+#if NETCOREAPP3_1_OR_GREATER
+using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IWebHostEnvironment;
+#else
+using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IHostingEnvironment;
+#endif
+
+namespace Sentry.AspNetCore.Tests;
+
+public class SentryWebHostBuilderExtensionsTests
 {
-    public class SentryWebHostBuilderExtensionsTests
+    public IWebHostBuilder WebHostBuilder { get; set; } = Substitute.For<IWebHostBuilder>();
+    public ServiceCollection Services { get; set; } = new();
+    public IConfiguration Configuration { get; set; } = Substitute.For<IConfiguration>();
+    public IHostingEnvironment HostingEnvironment { get; set; } = Substitute.For<IHostingEnvironment>();
+
+    public SentryWebHostBuilderExtensionsTests()
     {
-        public IWebHostBuilder WebHostBuilder { get; set; } = Substitute.For<IWebHostBuilder>();
-        public ServiceCollection Services { get; set; } = new();
-        public IConfiguration Configuration { get; set; } = Substitute.For<IConfiguration>();
-        public IHostingEnvironment HostingEnvironment { get; set; } = Substitute.For<IHostingEnvironment>();
+        // Substitutes return an empty string for every key, where configuration returns null for an absent one.
+        var emptySection = Substitute.For<IConfigurationSection>();
+        emptySection[Arg.Any<string>()].Returns((string)null);
+        Configuration.GetSection(Arg.Any<string>()).Returns(emptySection);
 
-        public SentryWebHostBuilderExtensionsTests()
+        var context = new WebHostBuilderContext
         {
-            var context = new WebHostBuilderContext
-            {
-                Configuration = Configuration,
-                HostingEnvironment = HostingEnvironment
-            };
+            Configuration = Configuration,
+            HostingEnvironment = HostingEnvironment
+        };
 
-            WebHostBuilder
-                .When(b => b.ConfigureServices(Arg.Any<Action<IServiceCollection>>()))
-                .Do(i => i.Arg<Action<IServiceCollection>>()(Services));
+        WebHostBuilder
+            .When(b => b.ConfigureServices(Arg.Any<Action<IServiceCollection>>()))
+            .Do(i => i.Arg<Action<IServiceCollection>>()(Services));
 
-            WebHostBuilder
-                .When(b => b.ConfigureServices(Arg.Any<Action<WebHostBuilderContext, IServiceCollection>>()))
-                .Do(i => i.Arg<Action<WebHostBuilderContext, IServiceCollection>>()(context, Services));
-        }
+        WebHostBuilder
+            .When(b => b.ConfigureServices(Arg.Any<Action<WebHostBuilderContext, IServiceCollection>>()))
+            .Do(i => i.Arg<Action<WebHostBuilderContext, IServiceCollection>>()(context, Services));
+    }
 
-        [Theory, MemberData(nameof(ExpectedServices))]
-        public void UseSentry_ValidDsnString_ServicesRegistered(Action<IServiceCollection> assert)
+    [Theory, MemberData(nameof(ExpectedServices))]
+    public void UseSentry_ValidDsnString_ServicesRegistered(Action<IServiceCollection> assert)
+    {
+        _ = WebHostBuilder.UseSentry(ValidDsn);
+        assert(Services);
+    }
+
+    [Theory, MemberData(nameof(ExpectedServices))]
+    public void UseSentry_Parameterless_ServicesRegistered(Action<IServiceCollection> assert)
+    {
+        _ = WebHostBuilder.UseSentry();
+        assert(Services);
+    }
+
+    [Theory, MemberData(nameof(ExpectedServices))]
+    public void UseSentry_DisableDsnString_ServicesRegistered(Action<IServiceCollection> assert)
+    {
+        _ = WebHostBuilder.UseSentry(Sentry.SentryConstants.DisableSdkDsnValue);
+        assert(Services);
+    }
+
+    [Theory, MemberData(nameof(ExpectedServices))]
+    public void UseSentry_Callback_ServicesRegistered(Action<IServiceCollection> assert)
+    {
+        _ = WebHostBuilder.UseSentry(o => o.Dsn = Sentry.SentryConstants.DisableSdkDsnValue);
+        assert(Services);
+    }
+
+    public static IEnumerable<object[]> ExpectedServices()
+    {
+        yield return new object[] {
+            new Action<IServiceCollection>(c =>
+                Assert.Single(c, d => d.ServiceType == typeof(IHub)))};
+        yield return new object[] {
+            new Action<IServiceCollection>(c =>
+                Assert.Single(c, d => d.ServiceType == typeof(HostLoggerProviders)))};
+        yield return new object[] {
+            new Action<IServiceCollection>(c =>
+                Assert.Single(c, d => d.ImplementationType == typeof(SentryStartupFilter)))};
+    }
+
+    [Fact]
+    public void UseSentry_SentryBuilderCallback_UsesHostingEnvironment()
+    {
+        HostingEnvironment.EnvironmentName = "Staging";
+
+        WebHostBuilder.UseSentry((ISentryBuilder sentryBuilder) =>
+            sentryBuilder.AddSentryOptions(options => options.FakeSettings()));
+        using var serviceProvider = Services.BuildServiceProvider();
+
+        var options = serviceProvider.GetRequiredService<IOptions<SentryAspNetCoreOptions>>().Value;
+        options.Environment.Should().Be("staging");
+    }
+
+    [Fact]
+    public void UseSentry_SentryBuilderCallbackSetsEnvironment_KeepsEnvironment()
+    {
+        HostingEnvironment.EnvironmentName = "Staging";
+
+        WebHostBuilder.UseSentry((ISentryBuilder sentryBuilder) =>
+            sentryBuilder.AddSentryOptions(options => options.Environment = "from-code"));
+        using var serviceProvider = Services.BuildServiceProvider();
+
+        var options = serviceProvider.GetRequiredService<IOptions<SentryAspNetCoreOptions>>().Value;
+        options.Environment.Should().Be("from-code");
+    }
+
+    [Fact]
+    public void UseSentry_Logging_AddLoggerProviders()
+    {
+        WebHostBuilder.UseSentry((SentryAspNetCoreOptions options) =>
         {
-            _ = WebHostBuilder.UseSentry(DsnSamples.ValidDsnWithoutSecret);
-            assert(Services);
-        }
+            options.Dsn = Sentry.SentryConstants.DisableSdkDsnValue;
+        });
+        using var serviceProvider = Services.BuildServiceProvider();
 
-        [Theory, MemberData(nameof(ExpectedServices))]
-        public void UseSentry_Parameterless_ServicesRegistered(Action<IServiceCollection> assert)
-        {
-            _ = WebHostBuilder.UseSentry();
-            assert(Services);
-        }
+        var providers = serviceProvider.GetRequiredService<IEnumerable<ILoggerProvider>>().ToArray();
 
-        [Theory, MemberData(nameof(ExpectedServices))]
-        public void UseSentry_DisableDsnString_ServicesRegistered(Action<IServiceCollection> assert)
-        {
-            _ = WebHostBuilder.UseSentry(Sentry.Constants.DisableSdkDsnValue);
-            assert(Services);
-        }
+        providers.Should().HaveCount(2);
+        providers[0].Should().BeOfType<SentryAspNetCoreLoggerProvider>();
+        providers[1].Should().BeOfType<SentryAspNetCoreStructuredLoggerProvider>();
+    }
 
-        [Theory, MemberData(nameof(ExpectedServices))]
-        public void UseSentry_Callback_ServicesRegistered(Action<IServiceCollection> assert)
+    [Fact]
+    public void UseSentry_WithLoggingAddSentry_LoggingAddSentryProvidersDisabled()
+    {
+        Services.AddLogging(logging => logging.AddSentry());
+        WebHostBuilder.UseSentry((SentryAspNetCoreOptions options) =>
         {
-            _ = WebHostBuilder.UseSentry(o => o.InitializeSdk = false);
-            assert(Services);
-        }
+            options.Dsn = Sentry.SentryConstants.DisableSdkDsnValue;
+        });
+        using var serviceProvider = Services.BuildServiceProvider();
 
-        public static IEnumerable<object[]> ExpectedServices()
+        var providers = serviceProvider.GetRequiredService<IEnumerable<ILoggerProvider>>();
+
+        providers.Select(p => p.GetType()).Should().Equal(
+            typeof(NullLoggerProvider),
+            typeof(NullLoggerProvider),
+            typeof(SentryAspNetCoreLoggerProvider),
+            typeof(SentryAspNetCoreStructuredLoggerProvider));
+    }
+
+    [Fact]
+    public void UseSentry_Logging_AddLoggerFilterRules()
+    {
+        WebHostBuilder.UseSentry((SentryAspNetCoreOptions options) =>
         {
-            yield return new object[] {
-                new Action<IServiceCollection>(c =>
-                    Assert.Single(c, d => d.ServiceType == typeof(IHub)))};
-            yield return new object[] {
-                new Action<IServiceCollection>(c =>
-                    Assert.Single(c, d => d.ImplementationType == typeof(SentryAspNetCoreLoggerProvider)))};
-            yield return new object[] {
-                new Action<IServiceCollection>(c =>
-                    Assert.Single(c, d => d.ImplementationType == typeof(SentryStartupFilter)))};
-        }
+            options.Dsn = Sentry.SentryConstants.DisableSdkDsnValue;
+        });
+        using var serviceProvider = Services.BuildServiceProvider();
+
+        var loggerFilterOptions = serviceProvider.GetRequiredService<IOptions<LoggerFilterOptions>>().Value;
+
+        loggerFilterOptions.Rules.Should().HaveCount(3);
+        var one = loggerFilterOptions.Rules[0];
+        var two = loggerFilterOptions.Rules[1];
+        var three = loggerFilterOptions.Rules[2];
+
+        one.ProviderName.Should().Be(typeof(SentryAspNetCoreLoggerProvider).FullName);
+        one.CategoryName.Should().BeNull();
+        one.LogLevel.Should().BeNull();
+        one.Filter.Should().NotBeNull();
+        one.Filter!.Invoke(null, null, LogLevel.None).Should().BeTrue();
+        one.Filter.Invoke("", "", LogLevel.None).Should().BeTrue();
+        one.Filter.Invoke("type", "category", LogLevel.None).Should().BeTrue();
+        one.Filter.Invoke(null, typeof(Microsoft.AspNetCore.Diagnostics.ExceptionHandlerMiddleware).FullName, LogLevel.None).Should().BeFalse();
+
+        two.ProviderName.Should().Be(typeof(SentryAspNetCoreStructuredLoggerProvider).FullName);
+        two.CategoryName.Should().Be(typeof(ISentryClient).FullName);
+        two.LogLevel.Should().Be(LogLevel.None);
+        two.Filter.Should().BeNull();
+
+        three.ProviderName.Should().Be(typeof(SentryAspNetCoreStructuredLoggerProvider).FullName);
+        three.CategoryName.Should().Be(typeof(SentryMiddleware).FullName);
+        three.LogLevel.Should().Be(LogLevel.None);
+        three.Filter.Should().BeNull();
     }
 }

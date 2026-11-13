@@ -1,60 +1,101 @@
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
-
-#if !NETSTANDARD2_0
 using Microsoft.AspNetCore.Http.Features;
-#endif
+using Microsoft.AspNetCore.Routing;
+using Sentry.Extensibility;
 
-namespace Sentry.AspNetCore.Extensions
+namespace Sentry.AspNetCore.Extensions;
+
+internal static class HttpContextExtensions
 {
-    internal static class HttpContextExtensions
+    internal static string? TryGetRouteTemplate(this HttpContext context)
     {
-        public static string? TryGetRouteTemplate(this HttpContext context)
+        // Requires .UseRouting()/.UseEndpoints()
+        var endpoint = context.Features.Get<IEndpointFeature?>()?.Endpoint as RouteEndpoint;
+        var routePattern = endpoint?.RoutePattern.RawText;
+
+        // GetRouteData can return null on netstandard2 (despite annotations claiming otherwise)
+        if (RouteUtils.NewRouteFormat(routePattern, context.GetRouteData()?.Values, context.Request.PathBase)
+            is { } formattedRoute)
         {
-#if !NETSTANDARD2_0 // endpoint routing is only supported after ASP.NET Core 3.0
-            // Requires .UseRouting()/.UseEndpoints()
-            var endpoint = context.Features.Get<IEndpointFeature?>()?.Endpoint as RouteEndpoint;
-            var routePattern = endpoint?.RoutePattern.RawText;
+            return formattedRoute;
+        }
 
-            if (!string.IsNullOrWhiteSpace(routePattern))
-            {
-                return routePattern;
-            }
-#endif
+        // Fallback for legacy .UseMvc().
+        // Note: GetRouteData can return null on netstandard2
+        return (context.GetRouteData() is { } routeData)
+                ? RouteUtils.LegacyRouteFormat(routeData.Values, context.Request.PathBase)
+                : null;
+    }
 
-            // Fallback for legacy .UseMvc().
-            // Uses context.Features.Get<IRoutingFeature?>() under the hood and CAN be null,
-            // despite the annotations claiming otherwise.
-            var routeData = context.GetRouteData();
+    internal static string? TryGetCustomTransactionName(this HttpContext context)
+    {
+        var customName = context.Features.Get<TransactionNameProvider>()?.Invoke(context);
+        return !string.IsNullOrEmpty(customName) ? customName : null;
+    }
 
-            var controller = routeData?.Values["controller"]?.ToString();
-            var action = routeData?.Values["action"]?.ToString();
-            var area = routeData?.Values["area"]?.ToString();
-
-            if (!string.IsNullOrWhiteSpace(action))
-            {
-                return !string.IsNullOrWhiteSpace(area)
-                    ? $"{area}.{controller}.{action}"
-                    : $"{controller}.{action}";
-            }
-
-            // If the handler doesn't use routing (i.e. it checks `context.Request.Path` directly),
-            // then there is no way for us to extract anything that resembles a route template.
+    public static string? TryGetTransactionName(this HttpContext context)
+    {
+        var route = context.TryGetRouteTemplate();
+        if (string.IsNullOrWhiteSpace(route))
+        {
             return null;
         }
 
-        public static string? TryGetTransactionName(this HttpContext context)
+        var method = context.Request.Method.ToUpperInvariant();
+
+        // e.g. "GET /pets/{id}"
+        return $"{method} {route}";
+    }
+
+    public static SentryTraceHeader? TryGetSentryTraceHeader(this HttpContext context, SentryOptions? options)
+    {
+        var value = context.Request.Headers.GetValueOrDefault(SentryTraceHeader.HttpHeaderName);
+        if (string.IsNullOrWhiteSpace(value))
         {
-            var route = context.TryGetRouteTemplate();
-            if (string.IsNullOrWhiteSpace(route))
+            return null;
+        }
+
+        options?.LogDebug("Received Sentry trace header '{0}'.", value);
+
+        try
+        {
+            var traceHeader = SentryTraceHeader.Parse(value!);
+            if (traceHeader?.TraceId != SentryId.Empty)
             {
-                return null;
+                return traceHeader;
             }
 
-            var method = context.Request.Method.ToUpperInvariant();
+            options?.LogWarning("Sentry trace header '{0}' has an empty trace ID.", value);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            options?.LogError(ex, "Invalid Sentry trace header '{0}'.", value);
+            return null;
+        }
+    }
 
-            // e.g. "GET /pets/1"
-            return $"{method} {route}";
+    public static BaggageHeader? TryGetBaggageHeader(this HttpContext context, SentryOptions? options)
+    {
+        var value = context.Request.Headers.GetValueOrDefault(BaggageHeader.HttpHeaderName);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        // Note: If there are multiple baggage headers, they will be joined with comma delimiters,
+        // and can thus be treated as a single baggage header.
+
+        options?.LogDebug("Received baggage header '{0}'.", value);
+
+        try
+        {
+            return BaggageHeader.TryParse(value!, onlySentry: true);
+        }
+        catch (Exception ex)
+        {
+            options?.LogError(ex, "Invalid baggage header '{0}'.", value);
+            return null;
         }
     }
 }

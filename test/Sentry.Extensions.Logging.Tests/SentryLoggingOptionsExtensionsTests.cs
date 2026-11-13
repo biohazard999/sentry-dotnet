@@ -1,36 +1,53 @@
-using Xunit;
+using Microsoft.Extensions.Logging;
 
-namespace Sentry.Extensions.Logging.Tests
+namespace Sentry.Extensions.Logging.Tests;
+
+public class SentryLoggingOptionsExtensionsTests
 {
-    public class SentryLoggingOptionsExtensionsTests
+    private class TestHostOptions : SentryHostOptions;
+
+    [Fact]
+    public void AddLogEntryFilter_LoggingOptions_AddsFilter()
     {
-        private readonly SentryLoggingOptions _sut = new();
+        var sut = new SentryLoggingOptions();
+        var filter = Substitute.For<ILogEntryFilter>();
 
-        [Fact]
-        public void ApplyDefaultTags_TagInEvent_DoesNotOverrideTag()
+        sut.AddLogEntryFilter(filter);
+
+        sut.Filters.Should().ContainSingle().Which.Should().BeSameAs(filter);
+    }
+
+    [Fact]
+    public void AddLogEntryFilter_HostOptions_AddsFilterToLoggingOptions()
+    {
+        var sut = new TestHostOptions();
+        var filter = Substitute.For<ILogEntryFilter>();
+
+        sut.AddLogEntryFilter(filter);
+
+        sut.Logging.Filters.Should().ContainSingle().Which.Should().BeSameAs(filter);
+    }
+
+    [Fact]
+    public void AddLogEntryFilter_HostOptionsDelegate_AddsFilterToLoggingOptions()
+    {
+        var sut = new TestHostOptions();
+
+        sut.AddLogEntryFilter((_, _, _, _) => true);
+
+        sut.Logging.Filters.Should().ContainSingle().Which.Should().BeOfType<DelegateLogEntryFilter>();
+    }
+
+    [Fact]
+    public void MinimumLevels_HostOptions_PassThroughToLoggingOptions()
+    {
+        var sut = new TestHostOptions
         {
-            const string key = "key";
-            const string expected = "event tag value";
-            var target = new SentryEvent();
-            target.SetTag(key, expected);
-            _sut.DefaultTags[key] = "default value";
+            MinimumBreadcrumbLevel = LogLevel.Debug,
+            MinimumEventLevel = LogLevel.Critical,
+        };
 
-            _sut.ApplyDefaultTags(target);
-
-            Assert.Equal(expected, target.Tags[key]);
-        }
-
-        [Fact]
-        public void ApplyDefaultTags_TagNotInEvent_AppliesTag()
-        {
-            const string key = "key";
-            const string expected = "default tag value";
-            var target = new SentryEvent();
-            _sut.DefaultTags[key] = expected;
-
-            _sut.ApplyDefaultTags(target);
-
-            Assert.Equal(expected, target.Tags[key]);
-        }
+        sut.Logging.MinimumBreadcrumbLevel.Should().Be(LogLevel.Debug);
+        sut.Logging.MinimumEventLevel.Should().Be(LogLevel.Critical);
     }
 }

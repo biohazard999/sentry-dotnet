@@ -1,164 +1,269 @@
-using System;
-using System.Diagnostics;
-using System.Runtime.ExceptionServices;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Diagnostics;
-#if NETSTANDARD2_0
-using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IHostingEnvironment;
-#else
-using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IWebHostEnvironment;
-#endif
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Sentry.AspNetCore.Extensions;
+using Sentry.Ben.BlockingDetector;
 using Sentry.Extensibility;
-using Sentry.Protocol;
+using Sentry.Internal;
 using Sentry.Reflection;
+using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IWebHostEnvironment;
 
-namespace Sentry.AspNetCore
+namespace Sentry.AspNetCore;
+
+/// <summary>
+/// Sentry middleware for ASP.NET Core
+/// </summary>
+internal class SentryMiddleware : IMiddleware
 {
+    internal static readonly object TraceHeaderItemKey = new();
+    internal static readonly object BaggageHeaderItemKey = new();
+    internal static readonly object TransactionContextItemKey = new();
+
+    private readonly Func<IHub> _getHub;
+    private readonly SentryAspNetCoreOptions _options;
+    private readonly IHostingEnvironment _hostingEnvironment;
+    private readonly ILogger<SentryMiddleware> _logger;
+    private readonly IEnumerable<ISentryEventExceptionProcessor> _eventExceptionProcessors;
+    private readonly IEnumerable<ISentryEventProcessor> _eventProcessors;
+    private readonly IEnumerable<ISentryTransactionProcessor> _transactionProcessors;
+
+    internal static readonly SdkVersion NameAndVersion
+        = typeof(SentryMiddleware).Assembly.GetNameAndVersion();
+
+
+    // Ben.BlockingDetector
+    private readonly IBlockingMonitor? _monitor;
+    private readonly TaskBlockingListener? _listener;
+
+    // Internal for testing
+    internal IBlockingMonitor? Monitor => _monitor;
+    internal TaskBlockingListener? Listener => _listener;
+
     /// <summary>
-    /// Sentry middleware for ASP.NET Core
+    /// Initializes a new instance of the <see cref="SentryMiddleware"/> class.
     /// </summary>
-    internal class SentryMiddleware
+    /// <param name="getHub">The sentry Hub accessor.</param>
+    /// <param name="options">The options for this integration</param>
+    /// <param name="hostingEnvironment">The hosting environment.</param>
+    /// <param name="logger">Sentry logger.</param>
+    /// <param name="eventExceptionProcessors">Custom Event Exception Processors</param>
+    /// <param name="eventProcessors">Custom Event Processors</param>
+    /// <param name="transactionProcessors">Custom Transaction Processors</param>
+    /// <param name="serviceProvider">The service provider, used to resolve dependencies.</param>
+    /// <exception cref="ArgumentNullException">
+    /// next
+    /// or
+    /// sentry
+    /// </exception>
+    public SentryMiddleware(
+        Func<IHub> getHub,
+        IOptions<SentryAspNetCoreOptions> options,
+        IHostingEnvironment hostingEnvironment,
+        ILogger<SentryMiddleware> logger,
+        IEnumerable<ISentryEventExceptionProcessor> eventExceptionProcessors,
+        IEnumerable<ISentryEventProcessor> eventProcessors,
+        IEnumerable<ISentryTransactionProcessor> transactionProcessors,
+        IServiceProvider serviceProvider)
     {
-        private readonly RequestDelegate _next;
-        private readonly Func<IHub> _getHub;
-        private readonly SentryAspNetCoreOptions _options;
-        private readonly IHostingEnvironment _hostingEnvironment;
-        private readonly ILogger<SentryMiddleware> _logger;
+        ArgumentNullException.ThrowIfNull(getHub);
 
-        internal static readonly SdkVersion NameAndVersion
-            = typeof(SentryMiddleware).Assembly.GetNameAndVersion();
+        _getHub = getHub;
+        _options = options.Value;
+        _hostingEnvironment = hostingEnvironment;
+        _logger = logger;
+        _eventExceptionProcessors = eventExceptionProcessors;
+        _eventProcessors = eventProcessors;
+        _transactionProcessors = transactionProcessors;
 
-        private static readonly string ProtocolPackageName = "nuget:" + NameAndVersion.Name;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SentryMiddleware"/> class.
-        /// </summary>
-        /// <param name="next">The next.</param>
-        /// <param name="getHub">The sentry Hub accessor.</param>
-        /// <param name="options">The options for this integration</param>
-        /// <param name="hostingEnvironment">The hosting environment.</param>
-        /// <param name="logger">Sentry logger.</param>
-        /// <exception cref="ArgumentNullException">
-        /// next
-        /// or
-        /// sentry
-        /// </exception>
-        public SentryMiddleware(
-            RequestDelegate next,
-            Func<IHub> getHub,
-            IOptions<SentryAspNetCoreOptions> options,
-            IHostingEnvironment hostingEnvironment,
-            ILogger<SentryMiddleware> logger)
+        if (_options.CaptureBlockingCalls)
         {
-            _next = next ?? throw new ArgumentNullException(nameof(next));
-            _getHub = getHub ?? throw new ArgumentNullException(nameof(getHub));
-            _options = options.Value;
-            var hub = _getHub();
-            foreach (var callback in _options.ConfigureScopeCallbacks)
-            {
-                hub.ConfigureScope(callback);
-            }
-            _hostingEnvironment = hostingEnvironment;
-            _logger = logger;
+            // Resolve shared singletons to keep overhead constant - See #5378.
+            _monitor = serviceProvider.GetRequiredService<IBlockingMonitor>();
+            _listener = serviceProvider.GetRequiredService<TaskBlockingListener>();
+        }
+    }
+
+    /// <summary>
+    /// Handles the <see cref="HttpContext"/> while capturing any errors
+    /// </summary>
+    /// <param name="context">The context.</param>
+    /// <param name="next">Delegate to next middleware.</param>
+    public async Task InvokeAsync(HttpContext context, RequestDelegate next)
+    {
+        var hub = _getHub();
+        if (!hub.IsEnabled)
+        {
+            await next(context).ConfigureAwait(false);
+            return;
         }
 
-        /// <summary>
-        /// Handles the <see cref="HttpContext"/> while capturing any errors
-        /// </summary>
-        /// <param name="context">The context.</param>
-        /// <returns></returns>
-        public async Task InvokeAsync(HttpContext context)
+        using (hub.PushAndLockScope())
         {
-            var hub = _getHub();
-            if (!hub.IsEnabled)
+            if (_options.MaxRequestBodySize != RequestSize.None)
             {
-                await _next(context).ConfigureAwait(false);
-                return;
+                context.Request.EnableBuffering();
             }
 
-            using (hub.PushAndLockScope())
+            if (_options.FlushOnCompletedRequest)
             {
-                if (_options.MaxRequestBodySize != RequestSize.None)
-                {
-                    context.Request.EnableBuffering();
-                }
+                // Serverless environments flush the queue at the end of each request
+                context.Response.OnCompleted(() => hub.FlushAsync(_options.FlushTimeout));
+            }
 
-                if (_options.FlushOnCompletedRequest)
+            var traceHeader = context.TryGetSentryTraceHeader(_options);
+            var baggageHeader = context.TryGetBaggageHeader(_options);
+            var transactionContext = hub.ContinueTrace(traceHeader, baggageHeader);
+
+            // Adding the headers and the TransactionContext to the context to be picked up by the Sentry tracing middleware
+            var didAdd = context.Items.TryAdd(TraceHeaderItemKey, traceHeader);
+            if (!didAdd)
+            {
+                _options.LogWarning("Sentry trace was already added. Did you initialize Sentry twice?");
+            }
+            context.Items.TryAdd(BaggageHeaderItemKey, baggageHeader);
+            context.Items.TryAdd(TransactionContextItemKey, transactionContext);
+
+            hub.ConfigureScope(static (scope, arg) =>
+            {
+                // At the point lots of stuff from the request are not yet filled
+                // Identity for example is added later on in the pipeline
+                // Subscribing to the event so that HTTP data is only read in case an event is going to be
+                // sent to Sentry. This avoid the cost on error-free requests.
+                // In case of event, all data made available through the HTTP Context at the time of the
+                // event creation will be sent to Sentry
+
+                // Important: The scope that the event is attached to is not necessarily the same one that is active
+                // when the event fires.  Use `activeScope`, not `scope` or `hub`.
+                scope.OnEvaluating += (_, activeScope) =>
                 {
-                    context.Response.OnCompleted(async () =>
+                    arg.middleware.SyncOptionsScope(activeScope);
+                    arg.middleware.PopulateScope(arg.context, activeScope);
+                };
+            }, (middleware: this, context));
+
+            // Pre-create the Sentry Event ID and save it on the scope it so it's available throughout the pipeline,
+            // even if there's no event actually being sent to Sentry.  This allows for things like a custom exception
+            // handler page to access the event ID, enabling user feedback, etc.
+            var eventId = SentryId.Create();
+            hub.ConfigureScope(static (scope, eventId) => scope.LastEventId = eventId, eventId);
+
+            try
+            {
+                var originalMethod = context.Request.Method;
+                if (_options.CaptureBlockingCalls && _monitor is not null)
+                {
+                    var syncCtx = SynchronizationContext.Current;
+                    // Created per request as it carries per-request suppression state.
+                    var detectingSyncCtx = syncCtx is null
+                        ? new DetectBlockingSynchronizationContext(_monitor)
+                        : new DetectBlockingSynchronizationContext(_monitor, syncCtx);
+                    SynchronizationContext.SetSynchronizationContext(detectingSyncCtx);
+                    try
                     {
-                        // Serverless environments flush the queue at the end of each request
-                        await hub.FlushAsync(timeout: _options.FlushTimeout).ConfigureAwait(false);
-                    });
-                }
-
-                hub.ConfigureScope(scope =>
-                {
-                    // At the point lots of stuff from the request are not yet filled
-                    // Identity for example is added later on in the pipeline
-                    // Subscribing to the event so that HTTP data is only read in case an event is going to be
-                    // sent to Sentry. This avoid the cost on error-free requests.
-                    // In case of event, all data made available through the HTTP Context at the time of the
-                    // event creation will be sent to Sentry
-
-                    scope.OnEvaluating += (_, _) => PopulateScope(context, scope);
-                });
-
-                try
-                {
-                    await _next(context).ConfigureAwait(false);
-
-                    // When an exception was handled by other component (i.e: UseExceptionHandler feature).
-                    var exceptionFeature = context.Features.Get<IExceptionHandlerFeature?>();
-                    if (exceptionFeature?.Error != null)
+                        // For detection to work we need ConfigureAwait=true
+                        await next(context).ConfigureAwait(true);
+                    }
+                    finally
                     {
-                        CaptureException(exceptionFeature.Error);
+                        SynchronizationContext.SetSynchronizationContext(syncCtx);
                     }
                 }
-                catch (Exception e)
+                else
                 {
-                    CaptureException(e);
-
-                    ExceptionDispatchInfo.Capture(e).Throw();
+                    await next(context).ConfigureAwait(false);
+                }
+                if (_options.Instrumenter == Instrumenter.OpenTelemetry && Activity.Current is { } activity)
+                {
+                    // The middleware pipeline finishes up before the Otel Activity.OnEnd callback is invoked so we need
+                    // so save a copy of the scope that can be restored by our SentrySpanProcessor
+                    hub.ConfigureScope(static (scope, activity) => activity.SetFused(scope), activity);
                 }
 
-                void CaptureException(Exception e)
+                // When an exception was handled by other component (i.e: UseExceptionHandler feature).
+                var exceptionFeature = context.Features.Get<IExceptionHandlerFeature?>();
+                if (exceptionFeature?.Error != null)
                 {
-                    var evt = new SentryEvent(e);
+                    const string description =
+                        "This exception was caught by an ASP.NET Core custom error handler. " +
+                        "The web server likely returned a customized error page as a result of this exception.";
 
-                    _logger.LogTrace("Sending event '{SentryEvent}' to Sentry.", evt);
-
-                    var id = hub.CaptureEvent(evt);
-
-                    _logger.LogInformation("Event '{id}' queued.", id);
+#if NET6_0_OR_GREATER
+                    hub.ConfigureScope(static (scope, arg) =>
+                    {
+                        scope.ExceptionProcessors.Add(
+                            new ExceptionHandlerFeatureProcessor(arg.originalMethod, arg.exceptionFeature)
+                            );
+                    }, (originalMethod, exceptionFeature));
+#endif
+                    CaptureException(exceptionFeature.Error, eventId, "IExceptionHandlerFeature", description);
                 }
+
+                if (_options.FlushBeforeRequestCompleted)
+                {
+                    await FlushBeforeCompleted().ConfigureAwait(false);
+                }
+            }
+            catch (Exception e)
+            {
+                const string description =
+                    "This exception was captured by the Sentry ASP.NET Core middleware, and then re-thrown." +
+                    "The web server likely returned a 5xx error code as a result of this exception.";
+
+                CaptureException(e, eventId, "SentryMiddleware.UnhandledException", description);
+
+                if (_options.FlushBeforeRequestCompleted)
+                {
+                    await FlushBeforeCompleted().ConfigureAwait(false);
+                }
+
+                ExceptionDispatchInfo.Capture(e).Throw();
+            }
+
+            // Some environments disables the application after sending a request,
+            // preventing OnCompleted flush from working.
+            Task FlushBeforeCompleted() => hub.FlushAsync(_options.FlushTimeout);
+
+            void CaptureException(Exception e, SentryId evtId, string mechanism, string description)
+            {
+                e.SetSentryMechanism(mechanism, description, handled: false);
+
+                var evt = new SentryEvent(e, eventId: evtId);
+
+                _logger.LogTrace("Sending event '{SentryEvent}' to Sentry.", evt);
+
+                var id = hub.CaptureEvent(evt);
+
+                _logger.LogInformation("Event '{id}' queued.", id);
             }
         }
+    }
 
-        internal void PopulateScope(HttpContext context, Scope scope)
+    private void SyncOptionsScope(Scope scope)
+    {
+        foreach (var callback in _options.ConfigureScopeCallbacks)
         {
-            scope.Sdk.Name = Constants.SdkName;
-            scope.Sdk.Version = NameAndVersion.Version;
+            callback.Invoke(scope);
+        }
+    }
 
-            if (NameAndVersion.Version is { } version)
-            {
-                scope.Sdk.AddPackage(ProtocolPackageName, version);
-            }
+    internal void PopulateScope(HttpContext context, Scope scope)
+    {
+        scope.AddEventProcessors(_eventProcessors.Except(scope.GetAllEventProcessors()));
+        scope.AddExceptionProcessors(_eventExceptionProcessors.Except(scope.GetAllExceptionProcessors()));
+        scope.AddTransactionProcessors(_transactionProcessors.Except(scope.GetAllTransactionProcessors()));
 
-            if (_hostingEnvironment.WebRootPath is { } webRootPath)
-            {
-                scope.SetWebRoot(webRootPath);
-            }
+        if (_hostingEnvironment.WebRootPath is { } webRootPath)
+        {
+            scope.SetWebRoot(webRootPath);
+        }
 
-            scope.Populate(context, _options);
+        scope.Populate(context, _options);
 
-            if (_options.IncludeActivityData && Activity.Current is not null)
-            {
-                scope.Populate(Activity.Current);
-            }
+        if (_options.IncludeActivityData && Activity.Current is not null)
+        {
+            scope.Populate(Activity.Current);
         }
     }
 }

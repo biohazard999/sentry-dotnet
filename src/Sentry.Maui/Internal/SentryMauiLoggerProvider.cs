@@ -1,0 +1,22 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Sentry.Extensions.Logging;
+using Sentry.Infrastructure;
+
+namespace Sentry.Maui.Internal;
+
+/// <summary>
+/// Sentry Logger Provider for <see cref="Breadcrumb"/> and <see cref="SentryEvent"/>.
+/// </summary>
+internal sealed class SentryMauiLoggerProvider : SentryLoggerProvider
+{
+    public SentryMauiLoggerProvider(IOptions<SentryMauiOptions> options, IHub hub)
+        : base(hub, SystemClock.Clock, options.Value.Logging)
+    {
+    }
+
+    internal SentryMauiLoggerProvider(SentryMauiOptions options, IHub hub, ISystemClock clock)
+        : base(hub, clock, options.Logging)
+    {
+    }
+}

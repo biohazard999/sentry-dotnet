@@ -1,151 +1,224 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
 using Sentry.Extensibility;
+using Sentry.Internal.Extensions;
 using Sentry.Protocol;
 
-namespace Sentry.Internal
+namespace Sentry.Internal;
+
+internal class MainExceptionProcessor : ISentryEventExceptionProcessor, ISdkProcessor
 {
-    internal class MainExceptionProcessor : ISentryEventExceptionProcessor
+    private const string ExceptionDataKeyPrefix = "sentry:";
+    internal const string ExceptionDataTagKey = ExceptionDataKeyPrefix + "tag:";
+    internal const string ExceptionDataContextKey = ExceptionDataKeyPrefix + "context:";
+
+    private readonly SentryOptions _options;
+    internal Func<ISentryStackTraceFactory> SentryStackTraceFactoryAccessor { get; }
+
+    public MainExceptionProcessor(SentryOptions options, Func<ISentryStackTraceFactory> sentryStackTraceFactoryAccessor)
     {
+        _options = options;
+        SentryStackTraceFactoryAccessor = sentryStackTraceFactoryAccessor;
+    }
 
-        internal static readonly string ExceptionDataTagKey = "sentry:tag:";
-        internal static readonly string ExceptionDataContextKey = "sentry:context:";
+    public void Process(Exception exception, SentryEvent sentryEvent)
+    {
+        _options.LogDebug("Running processor on exception: {0}", exception.Message);
 
-        private readonly SentryOptions _options;
-        internal Func<ISentryStackTraceFactory> SentryStackTraceFactoryAccessor { get; }
+        var sentryExceptions = CreateSentryExceptions(exception);
 
-        public MainExceptionProcessor(SentryOptions options, Func<ISentryStackTraceFactory> sentryStackTraceFactoryAccessor)
+        MoveExceptionDataToEvent(sentryEvent, sentryExceptions);
+
+        sentryEvent.SentryExceptions = sentryExceptions;
+    }
+
+    // Sentry exceptions are sorted oldest to newest.
+    // See https://develop.sentry.dev/sdk/event-payloads/exception
+    internal IReadOnlyList<SentryException> CreateSentryExceptions(Exception exception)
+    {
+        var exceptions = WalkExceptions(exception).Reverse().ToList();
+
+        // In the case of only one exception, ExceptionId and ParentId are useless.
+        if (exceptions.Count == 1 && exceptions[0].Mechanism is { } mechanism)
         {
-            _options = options;
-            SentryStackTraceFactoryAccessor = sentryStackTraceFactoryAccessor;
-        }
-
-        public void Process(Exception exception, SentryEvent sentryEvent)
-        {
-            _options.DiagnosticLogger?.LogDebug("Running processor on exception: {0}", exception.Message);
-
-            var sentryExceptions = CreateSentryException(exception)
-                // Otherwise realization happens on the worker thread before sending event.
-                .ToList();
-
-            MoveExceptionExtrasToEvent(sentryEvent, sentryExceptions);
-
-            sentryEvent.SentryExceptions = sentryExceptions;
-        }
-
-        // SentryException.Extra is not supported by Sentry yet.
-        // Move the extras to the Event Extra while marking
-        // by index the Exception which owns it.
-        private static void MoveExceptionExtrasToEvent(
-            SentryEvent sentryEvent,
-            IReadOnlyList<SentryException> sentryExceptions)
-        {
-            for (var i = 0; i < sentryExceptions.Count; i++)
+            mechanism.ExceptionId = null;
+            mechanism.ParentId = null;
+            if (mechanism.IsDefaultOrEmpty())
             {
-                var sentryException = sentryExceptions[i];
+                // No need to convey an empty mechanism.
+                exceptions[0].Mechanism = null;
+            }
+        }
 
-                if (sentryException.Data.Count <= 0)
-                {
-                    continue;
-                }
+        return exceptions;
+    }
 
-                foreach (var keyValue in sentryException.Data)
+    private class Counter
+    {
+        private int _value;
+
+        public int GetNextValue() => _value++;
+    }
+
+    private IEnumerable<SentryException> WalkExceptions(Exception exception) =>
+        WalkExceptions(exception, new Counter(), null, null);
+
+    private IEnumerable<SentryException> WalkExceptions(Exception exception, Counter counter, int? parentId, string? source)
+    {
+        var ex = exception;
+        while (ex is not null)
+        {
+            var id = counter.GetNextValue();
+
+            yield return BuildSentryException(ex, id, parentId, source);
+
+            if (ex is AggregateException aex)
+            {
+                for (var i = 0; i < aex.InnerExceptions.Count; i++)
                 {
-                    if (keyValue.Key.StartsWith("sentry:", StringComparison.OrdinalIgnoreCase) &&
-                        keyValue.Value != null)
+                    ex = aex.InnerExceptions[i];
+                    source = $"{nameof(AggregateException.InnerExceptions)}[{i}]";
+                    var sentryExceptions = WalkExceptions(ex, counter, id, source);
+                    foreach (var sentryException in sentryExceptions)
                     {
-                        if (keyValue.Key.StartsWith(ExceptionDataTagKey, StringComparison.OrdinalIgnoreCase) &&
-                            keyValue.Value is string tagValue &&
-                            ExceptionDataTagKey.Length < keyValue.Key.Length)
-                        {
-                            // Set the key after the ExceptionDataTagKey string.
-                            sentryEvent.SetTag(keyValue.Key.Substring(ExceptionDataTagKey.Length), tagValue);
-                        }
-                        else if (keyValue.Key.StartsWith(ExceptionDataContextKey, StringComparison.OrdinalIgnoreCase) &&
-                            ExceptionDataContextKey.Length < keyValue.Key.Length)
-                        {
-                            // Set the key after the ExceptionDataTagKey string.
-                            _ = sentryEvent.Contexts[keyValue.Key.Substring(ExceptionDataContextKey.Length)] = keyValue.Value;
-                        }
-                        else
-                        {
-                            sentryEvent.SetExtra($"Exception[{i}][{keyValue.Key}]", sentryException.Data[keyValue.Key]);
-                        }
-                    }
-                    else
-                    {
-                        sentryEvent.SetExtra($"Exception[{i}][{keyValue.Key}]", sentryException.Data[keyValue.Key]);
+                        yield return sentryException;
                     }
                 }
-            }
-        }
 
-        internal IEnumerable<SentryException> CreateSentryException(Exception exception)
+                break;
+            }
+
+            ex = ex.InnerException;
+            parentId = id;
+            source = nameof(AggregateException.InnerException);
+        }
+    }
+
+    private static void MoveExceptionDataToEvent(SentryEvent sentryEvent, IEnumerable<SentryException> sentryExceptions)
+    {
+        var keysToRemove = new List<string>();
+
+        var i = 0;
+        foreach (var sentryException in sentryExceptions)
         {
-            if (exception is AggregateException ae)
+            var data = sentryException.Mechanism?.Data;
+            if (data is null || data.Count == 0)
             {
-                foreach (var inner in ae.InnerExceptions.SelectMany(CreateSentryException))
-                {
-                    yield return inner;
-                }
-            }
-            else if (exception.InnerException != null)
-            {
-                foreach (var inner in CreateSentryException(exception.InnerException))
-                {
-                    yield return inner;
-                }
+                i++;
+                continue;
             }
 
-            var sentryEx = new SentryException
+            foreach (var (key, value) in data)
             {
-                Type = exception.GetType()?.FullName,
-                Module = exception.GetType()?.Assembly?.FullName,
-                Value = exception.Message,
-                ThreadId = Thread.CurrentThread.ManagedThreadId,
-                Mechanism = GetMechanism(exception)
-            };
-
-            if (exception.Data.Count != 0)
-            {
-                foreach (var key in exception.Data.Keys)
+                if (key.Length > ExceptionDataTagKey.Length &&
+                    value is string stringValue &&
+                    key.StartsWith(ExceptionDataTagKey, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (key is string keyString)
-                    {
-                        sentryEx.Data[keyString] = exception.Data[key];
-                    }
+                    sentryEvent.SetTag(key[ExceptionDataTagKey.Length..], stringValue);
+                    keysToRemove.Add(key);
+                }
+                else if (key.Length > ExceptionDataContextKey.Length &&
+                         !value.IsNull() &&
+                         key.StartsWith(ExceptionDataContextKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    sentryEvent.Contexts[key[ExceptionDataContextKey.Length..]] = value;
+                    keysToRemove.Add(key);
+                }
+                else if (key.StartsWith(ExceptionDataKeyPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    sentryEvent.SetExtra($"Exception[{i}][{key}]", value);
+                    keysToRemove.Add(key);
                 }
             }
 
-            sentryEx.Stacktrace = SentryStackTraceFactoryAccessor().Create(exception);
+            foreach (var key in keysToRemove)
+            {
+                data.Remove(key);
+            }
 
-            yield return sentryEx;
+            keysToRemove.Clear();
+            i++;
         }
+    }
 
-        internal static Mechanism GetMechanism(Exception exception)
+    private SentryException BuildSentryException(Exception exception, int id, int? parentId, string? source)
+    {
+        var sentryEx = new SentryException
         {
-            var mechanism = new Mechanism();
+            Type = exception.GetType().FullName,
+            Module = exception.GetType().Assembly.FullName,
+            Value = exception is AggregateException agg ? agg.GetRawMessage() : exception.Message,
+            ThreadId = Environment.CurrentManagedThreadId
+        };
 
-            if (exception.HelpLink != null)
-            {
-                mechanism.HelpLink = exception.HelpLink;
-            }
-
-            if (exception.Data[Mechanism.HandledKey] is bool handled)
-            {
-                mechanism.Handled = handled;
-                exception.Data.Remove(Mechanism.HandledKey);
-            }
-
-            if (exception.Data[Mechanism.MechanismKey] is string mechanismName)
-            {
-                mechanism.Type = mechanismName;
-                exception.Data.Remove(Mechanism.MechanismKey);
-            }
-
-            return mechanism;
+        var mechanism = GetMechanism(exception, id, parentId, source);
+        if (!mechanism.IsDefaultOrEmpty())
+        {
+            sentryEx.Mechanism = mechanism;
         }
+
+        sentryEx.Stacktrace ??= SentryStackTraceFactoryAccessor().TryCreate(_options, exception);
+        return sentryEx;
+    }
+
+    private static Mechanism GetMechanism(Exception exception, int id, int? parentId, string? source)
+    {
+        var mechanism = new Mechanism();
+
+        if (exception.HelpLink != null)
+        {
+            mechanism.HelpLink = exception.HelpLink;
+        }
+
+        if (exception.Data[Mechanism.HandledKey] is bool handled)
+        {
+            // The mechanism handled flag was set by an integration.
+            mechanism.Handled = handled;
+            exception.Data.Remove(Mechanism.HandledKey);
+        }
+        else
+        {
+            // https://getsentry.github.io/relay/relay_event_schema/protocol/struct.Mechanism.html#structfield.handled
+            // "Exceptions captured using capture_exception (called from user code) are handled=true as the user
+            // explicitly captured the exception (and therefore kind of handled it)."
+            mechanism.Handled = true;
+        }
+
+        if (exception.Data[Mechanism.MechanismKey] is string mechanismType)
+        {
+            mechanism.Type = mechanismType;
+            exception.Data.Remove(Mechanism.MechanismKey);
+        }
+
+        if (exception.Data[Mechanism.DescriptionKey] is string mechanismDescription)
+        {
+            mechanism.Description = mechanismDescription;
+            exception.Data.Remove(Mechanism.DescriptionKey);
+        }
+
+        if (exception.Data[Mechanism.TerminalKey] is bool terminal)
+        {
+            mechanism.Terminal = terminal;
+            exception.Data.Remove(Mechanism.TerminalKey);
+        }
+
+        // Add HResult to mechanism data before adding exception data, so that it can be overridden.
+        mechanism.Data["HResult"] = $"0x{exception.HResult:X8}";
+
+        // Copy remaining exception data to mechanism data.
+        foreach (var key in exception.Data.Keys.OfType<string>())
+        {
+            mechanism.Data[key] = exception.Data[key]!;
+        }
+
+        mechanism.ExceptionId = id;
+        mechanism.ParentId = parentId;
+        mechanism.Source = source;
+        mechanism.IsExceptionGroup = exception is AggregateException;
+
+        if (source != null)
+        {
+            mechanism.Type = "chained";
+        }
+
+        return mechanism;
     }
 }

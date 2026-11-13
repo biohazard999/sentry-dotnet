@@ -1,160 +1,148 @@
-using System;
-using System.IO.Compression;
-using System.Net;
-using System.Text.Json;
-using Serilog;
-using Serilog.Events;
-using Xunit;
+using Serilog.Formatting;
 
-namespace Sentry.Serilog.Tests
+namespace Sentry.Serilog.Tests;
+
+public class SentrySerilogSinkExtensionsTests
 {
-
-    public class SentrySerilogSinkExtensionsTests
+    private class Fixture
     {
-        private class Fixture
+        // Parameter values that are NOT set to the default values in SentrySerilogOptions
+        public LogEventLevel MinimumEventLevel { get; } = LogEventLevel.Verbose;
+        public LogEventLevel MinimumBreadcrumbLevel { get; } = LogEventLevel.Fatal;
+        public IFormatProvider FormatProvider { get; } = CultureInfo.InvariantCulture;
+        public ITextFormatter TextFormatter { get; } = new MessageTemplateTextFormatter("[{MyTaskId}] {Message}");
+        public LogEventLevel RestrictedToMinimumLevel { get; } = LogEventLevel.Warning;
+        public LoggingLevelSwitch LevelSwitch { get; } = new(LogEventLevel.Error);
+
+        public static SentrySerilogOptions GetSut() => new();
+    }
+
+    private readonly Fixture _fixture = new();
+
+    [Fact]
+    public void ConfigureSentrySerilogOptions_NoParameters_LeavesDefaults()
+    {
+        var sut = Fixture.GetSut();
+
+        SentrySinkExtensions.ConfigureSentrySerilogOptions(sut);
+
+        AssertEqualDeep(new SentrySerilogOptions(), sut);
+    }
+
+    [Fact]
+    public void ConfigureSentrySerilogOptions_WithMultipleParameters_MakesAppropriateChangesToObject()
+    {
+        var sut = Fixture.GetSut();
+
+        SentrySinkExtensions.ConfigureSentrySerilogOptions(sut, minimumEventLevel: _fixture.MinimumEventLevel,
+            minimumBreadcrumbLevel: _fixture.MinimumBreadcrumbLevel);
+
+        var expected = new SentrySerilogOptions
         {
-            public SentrySerilogOptions Options { get; } = new();
+            MinimumEventLevel = _fixture.MinimumEventLevel,
+            MinimumBreadcrumbLevel = _fixture.MinimumBreadcrumbLevel
+        };
+        AssertEqualDeep(expected, sut);
+    }
 
-            // Parameter values that are NOT set to the default values in SentryOptions or SentrySerilogOptions
-            public bool SendDefaultPii { get; } = true;
-            public bool IsEnvironmentUser { get; } = false;
-            public string ServerName { get; } = nameof(ConfigureSentrySerilogOptions_WithAllParameters_MakesAppropriateChangesToObject);
-            public bool AttachStackTrace { get; } = true;
-            public int MaxBreadcrumbs { get; } = 9;
-            public float SampleRate { get; } = 0.4f;
-            public string Release { get; } = nameof(ConfigureSentrySerilogOptions_WithAllParameters_MakesAppropriateChangesToObject);
-            public string Environment { get; } = nameof(ConfigureSentrySerilogOptions_WithAllParameters_MakesAppropriateChangesToObject);
-            public string Dsn { get; } = DsnSamples.ValidDsnWithSecret;
-            public int MaxQueueItems { get; } = 17;
-            public TimeSpan ShutdownTimeout { get; } = TimeSpan.FromDays(1.3);
-            public DecompressionMethods DecompressionMethods { get; } = DecompressionMethods.Deflate & DecompressionMethods.GZip;
-            public CompressionLevel RequestBodyCompressionLevel { get; } = CompressionLevel.NoCompression;
-            public bool RequestBodyCompressionBuffered { get; } = false;
-            public bool Debug { get; } = true;
-            public SentryLevel DiagnosticLevel { get; } = SentryLevel.Warning;
-            public bool ReportAssemblies { get; } = false;
-            public DeduplicateMode DeduplicateMode { get; } = DeduplicateMode.SameExceptionInstance;
-            public bool InitializeSdk { get; } = false;
-            public LogEventLevel MinimumEventLevel { get; } = LogEventLevel.Verbose;
-            public LogEventLevel MinimumBreadcrumbLevel { get; } = LogEventLevel.Fatal;
+    [Fact]
+    public void ConfigureSentrySerilogOptions_WithAllParameters_MakesAppropriateChangesToObject()
+    {
+        var sut = Fixture.GetSut();
 
-            public SentrySerilogOptions GetSut() => new();
-        }
+        SentrySinkExtensions.ConfigureSentrySerilogOptions(sut, _fixture.MinimumEventLevel,
+            _fixture.MinimumBreadcrumbLevel, _fixture.FormatProvider, _fixture.TextFormatter,
+            _fixture.RestrictedToMinimumLevel, _fixture.LevelSwitch);
 
-        private readonly Fixture _fixture = new();
+        Assert.Equal(_fixture.MinimumEventLevel, sut.MinimumEventLevel);
+        Assert.Equal(_fixture.MinimumBreadcrumbLevel, sut.MinimumBreadcrumbLevel);
+        Assert.Same(_fixture.FormatProvider, sut.FormatProvider);
+        Assert.Same(_fixture.TextFormatter, sut.TextFormatter);
+        Assert.Equal(_fixture.RestrictedToMinimumLevel, sut.RestrictedToMinimumLevel);
+        Assert.Same(_fixture.LevelSwitch, sut.LevelSwitch);
+    }
 
-        [Fact]
-        public void ConfigureSentrySerilogOptions_WithNoParameters_MakesNoChangesToObject()
+    [Fact]
+    public void Sentry_WithRestrictedToMinimumLevel_ConfigureOptions_FiltersLogsBelow()
+    {
+        // Arrange
+        var hub = Substitute.For<IHub>();
+        hub.IsEnabled.Returns(true);
+        var options = new SentrySerilogOptions
         {
-            var sut = _fixture.GetSut();
+            MinimumBreadcrumbLevel = LogEventLevel.Verbose,
+            MinimumEventLevel = LogEventLevel.Verbose,
+            RestrictedToMinimumLevel = LogEventLevel.Error,
+        };
+        var sink = new SentrySink(options, () => hub, new MockClock());
+        using var logger = new LoggerConfiguration()
+            .MinimumLevel.Verbose()
+            .WriteTo.Sink(sink, options.RestrictedToMinimumLevel, options.LevelSwitch)
+            .CreateLogger();
 
-            // Make the call with only the required parameter
-            SentrySinkExtensions.ConfigureSentrySerilogOptions(sut);
+        // Act
+        logger.Warning("Below threshold");
+        logger.Error("At threshold");
 
-            // Compare. I'm not sure how to deep compare--I don't see a nuget ref to that type
-            // of functionality and I'm hesitant to introduce new technologies with such a
-            // small commit.
-            AssertEqualDeep(_fixture.Options, sut);
-        }
+        // Assert: Warning is filtered by Serilog before reaching the sink; only Error gets through
+        hub.Received(1).CaptureEvent(Arg.Any<SentryEvent>());
+        hub.DidNotReceive().CaptureEvent(Arg.Is<SentryEvent>(e =>
+            e.Message.Message == "Below threshold"));
+    }
 
-        [Fact]
-        public void ConfigureSentrySerilogOptions_WithOneParameter_MakesAppropriateChangeToObject()
-        {
-            var sut = _fixture.GetSut();
+    [Fact]
+    public void Sentry_WithRestrictedToMinimumLevel_ParameterIsAccepted()
+    {
+        var ex = Record.Exception(() =>
+            new LoggerConfiguration()
+                .WriteTo.Sentry(
+                    minimumBreadcrumbLevel: LogEventLevel.Verbose,
+                    minimumEventLevel: LogEventLevel.Error,
+                    restrictedToMinimumLevel: LogEventLevel.Warning)
+                .CreateLogger());
 
-            // Make the call with only the required parameter
-            const bool sendDefaultPii = true;
-            SentrySinkExtensions.ConfigureSentrySerilogOptions(sut, sendDefaultPii:sendDefaultPii);
+        Assert.Null(ex);
+    }
 
-            // Compare. I'm not sure how to deep compare--I don't see a nuget ref to that type
-            // of functionality and I'm hesitant to introduce new technologies with such a
-            // small commit.
-            AssertNotEqualDeep(_fixture.Options, sut);
+    [Fact]
+    public void Sentry_DsnOverload_InvokedByName_Throws()
+    {
+        var method = typeof(SentrySinkExtensions)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.Name == nameof(SentrySinkExtensions.Sentry)
+                         && m.GetParameters().Any(p => p.Name == "dsn"));
 
-            Assert.Equal(sendDefaultPii, sut.SendDefaultPii);
-        }
+        var arguments = method.GetParameters()
+            .Select(p => p.Name == "dsn"
+                ? "https://key@sentry.io/1"
+                : p.HasDefaultValue ? p.DefaultValue : null)
+            .ToArray();
+        arguments[0] = new LoggerConfiguration().WriteTo;
 
-        [Fact]
-        public void ConfigureSentrySerilogOptions_WithMultipleParameters_MakesAppropriateChangesToObject()
-        {
-            var sut = _fixture.GetSut();
+        var exception = Assert.Throws<TargetInvocationException>(() => method.Invoke(null, arguments));
 
-            SentrySinkExtensions.ConfigureSentrySerilogOptions(sut, sendDefaultPii:_fixture.SendDefaultPii,
-                decompressionMethods: _fixture.DecompressionMethods, reportAssemblies: _fixture.ReportAssemblies, sampleRate: _fixture.SampleRate);
+        Assert.IsType<NotSupportedException>(exception.InnerException);
+        Assert.Contains("no longer initializes the SDK", exception.InnerException!.Message);
+    }
 
-            // Fail early
-            AssertNotEqualDeep(_fixture.Options, sut);
+    [Fact]
+    public void Sentry_DsnOverload_IsObsoleteAsError()
+    {
+        var method = typeof(SentrySinkExtensions)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.Name == nameof(SentrySinkExtensions.Sentry)
+                         && m.GetParameters().Any(p => p.Name == "dsn"));
 
-            // Compare individual properties
-            Assert.Equal(_fixture.SendDefaultPii, sut.SendDefaultPii);
-            Assert.Equal(_fixture.DecompressionMethods, sut.DecompressionMethods);
-            Assert.Equal(_fixture.ReportAssemblies, sut.ReportAssemblies);
-            Assert.Equal(_fixture.SampleRate, sut.SampleRate);
-        }
+        var obsolete = method.GetCustomAttribute<ObsoleteAttribute>();
 
-        [Fact]
-        public void ConfigureSentrySerilogOptions_WithAllParameters_MakesAppropriateChangesToObject()
-        {
-            var sut = _fixture.GetSut();
+        Assert.NotNull(obsolete);
+        Assert.True(obsolete!.IsError);
+    }
 
-            SentrySinkExtensions.ConfigureSentrySerilogOptions(sut, _fixture.Dsn, _fixture.MinimumEventLevel,
-                _fixture.MinimumBreadcrumbLevel, null,_fixture.SendDefaultPii,
-                _fixture.IsEnvironmentUser, _fixture.ServerName, _fixture.AttachStackTrace, _fixture.MaxBreadcrumbs,
-                _fixture.SampleRate, _fixture.Release, _fixture.Environment,  _fixture.MaxQueueItems,
-                _fixture.ShutdownTimeout, _fixture.DecompressionMethods, _fixture.RequestBodyCompressionLevel,
-                _fixture.RequestBodyCompressionBuffered, _fixture.Debug, _fixture.DiagnosticLevel,
-                _fixture.ReportAssemblies, _fixture.DeduplicateMode, _fixture.InitializeSdk);
-
-            // Fail early
-            AssertNotEqualDeep(_fixture.Options, sut);
-
-            // Compare individual properties
-            Assert.Equal(_fixture.SendDefaultPii, sut.SendDefaultPii);
-            Assert.Equal(_fixture.IsEnvironmentUser, sut.IsEnvironmentUser);
-            Assert.Equal(_fixture.ServerName, sut.ServerName);
-            Assert.Equal(_fixture.AttachStackTrace, sut.AttachStacktrace);
-            Assert.Equal(_fixture.MaxBreadcrumbs, sut.MaxBreadcrumbs);
-            Assert.Equal(_fixture.SampleRate, sut.SampleRate);
-            Assert.Equal(_fixture.Release, sut.Release);
-            Assert.Equal(_fixture.Environment, sut.Environment);
-            Assert.Equal(_fixture.Dsn, sut.Dsn!);
-            Assert.Equal(_fixture.MaxQueueItems, sut.MaxQueueItems);
-            Assert.Equal(_fixture.ShutdownTimeout, sut.ShutdownTimeout);
-            Assert.Equal(_fixture.DecompressionMethods, sut.DecompressionMethods);
-            Assert.Equal(_fixture.RequestBodyCompressionLevel, sut.RequestBodyCompressionLevel);
-            Assert.Equal(_fixture.RequestBodyCompressionBuffered, sut.RequestBodyCompressionBuffered);
-            Assert.Equal(_fixture.Debug, sut.Debug);
-            Assert.Equal(_fixture.DiagnosticLevel, sut.DiagnosticLevel);
-            Assert.Equal(_fixture.ReportAssemblies, sut.ReportAssemblies);
-            Assert.Equal(_fixture.DeduplicateMode, sut.DeduplicateMode);
-            Assert.Equal(_fixture.InitializeSdk, sut.InitializeSdk);
-            Assert.Equal(_fixture.MinimumEventLevel, sut.MinimumEventLevel);
-            Assert.Equal(_fixture.MinimumBreadcrumbLevel, sut.MinimumBreadcrumbLevel);
-        }
-
-        private static void AssertEqualDeep(object expected, object actual)
-        {
-            AssertDeep(expected, actual, true);
-        }
-
-        private static void AssertNotEqualDeep(object left, object right)
-        {
-            AssertDeep(left, right, false);
-        }
-
-        private static void AssertDeep(object left, object right, bool shouldCheckEqual)
-        {
-            var serializedLeftObject = JsonSerializer.Serialize(left);
-            var serializedRightObject = JsonSerializer.Serialize(right);
-
-            if (shouldCheckEqual)
-            {
-                Assert.Equal(serializedLeftObject, serializedRightObject);
-            }
-            else
-            {
-                Assert.NotEqual(serializedLeftObject, serializedRightObject);
-            }
-        }
+    private static void AssertEqualDeep(object expected, object actual)
+    {
+        var serializedLeftObject = JsonSerializer.Serialize(expected);
+        var serializedRightObject = JsonSerializer.Serialize(actual);
+        Assert.Equal(serializedLeftObject, serializedRightObject);
     }
 }

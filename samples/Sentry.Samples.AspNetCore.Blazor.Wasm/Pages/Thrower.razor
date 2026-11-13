@@ -2,25 +2,40 @@
 @using Microsoft.Extensions.Logging
 @inject ILogger<Thrower> Logger
 
-<h1>Throw Exception</h1>
+<h1>Throw an Exception!</h1>
 
 <button class="btn btn-primary" @onclick="Throw">Throw</button>
 
 @if (SentrySdk.LastEventId != SentryId.Empty)
 {
-<p>Event Id: @SentrySdk.LastEventId</p>
+    <p>Sentry Event Id: @SentrySdk.LastEventId</p>
 }
 
 @code {
     private void Throw()
     {
-        Logger.LogInformation("Doing something ... ");
-        Stuff.DoSomething();
+        try
+        {
+            Logger.LogInformation("Throwing something... ");
+            StuffThrower.DoSomething();
+        }
+        finally
+        {
+            // To re-render the event ID.
+            // .NET 11 adds BL0012, which flags StateHasChanged in an event handler as
+            // redundant because Blazor re-renders automatically afterwards. That does not
+            // hold here: this handler always throws, so the automatic re-render never runs
+            // and the event ID would not appear without this call.
+#pragma warning disable BL0012
+            StateHasChanged();
+#pragma warning restore BL0012
+        }
+
     }
 
-    private static class Stuff
+    private static class StuffThrower
     {
         public static void DoSomething() => Thrower();
-        private static void Thrower() => throw null;
+        private static void Thrower() => throw null!;
     }
 }

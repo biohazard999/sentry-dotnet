@@ -1,4 +1,3 @@
-using System;
 using System.Security.Principal;
 using log4net;
 using log4net.Config;
@@ -11,8 +10,19 @@ internal class Program
 
     private static void Main()
     {
+        // Initialise the Sentry SDK. 
+        using var _ = SentrySdk.Init(options =>
+        {
+#if !SENTRY_DSN_DEFINED_IN_ENV
+            // A DSN is required. You can set here in code, or you can set it in the SENTRY_DSN environment variable.
+            // See https://docs.sentry.io/product/sentry-basics/dsn-explainer/
+            options.Dsn = SamplesShared.Dsn;
+#endif
+            options.Environment = "dev";
+        });
+
         // Set the user running the process the current principal
-        // Appender was configure to send the user with the event
+        // Appender was configured to send the user with the event
         AppDomain.CurrentDomain.SetPrincipalPolicy(PrincipalPolicy.WindowsPrincipal);
 
         // The following anonymous object gets serialized and sent with log messages
@@ -26,6 +36,10 @@ internal class Program
         // app.config enables SentryAppender only for level INFO or higher so the Debug
         // Does not result in an event in Sentry
         Log.Debug("Debug message which is not sent.");
+
+        // app.config sets MinimumEventLevel to ERROR, so every below that level is added as a breadcrumb.
+        Log.Info("Info message which is added as a breadcrumb.");
+        Log.Error("Error message which is sent as an event.");
 
         try
         {

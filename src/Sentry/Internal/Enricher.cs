@@ -1,105 +1,38 @@
-using System;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-using Sentry.PlatformAbstractions;
-using Sentry.Reflection;
-using OperatingSystem = Sentry.Protocol.OperatingSystem;
-using Runtime = Sentry.Protocol.Runtime;
+namespace Sentry.Internal;
 
-namespace Sentry.Internal
+internal class Enricher
 {
-    internal class Enricher
+    internal const string DefaultIpAddress = "{{auto}}";
+
+    private readonly SentryOptions _options;
+
+    public Enricher(SentryOptions options) => _options = options;
+
+    public void Apply(IEventLike eventLike)
     {
-        private readonly SentryOptions _options;
+        _options.ScopeDefaults.Apply(eventLike);
 
-        private readonly Lazy<Runtime> _runtimeLazy = new(() =>
+        // User
+        // Report local user if opt-in PII, no user was already set to event and feature not opted-out:
+        if (_options.SendDefaultPii)
         {
-            var current = PlatformAbstractions.Runtime.Current;
-            return new Runtime
+            if (_options.IsEnvironmentUser && !eventLike.HasUser())
             {
-                Name = current.Name,
-                Version = current.Version,
-                RawDescription = current.Raw
-            };
-        });
+                eventLike.User.Username = Environment.UserName;
+            }
 
-        private readonly Lazy<SdkVersion> _sdkVersionLazy =
-            new(() => typeof(ISentryClient).Assembly.GetNameAndVersion());
-
-        private readonly Lazy<string?> _releaseLazy = new(ReleaseLocator.GetCurrent);
-
-        public Enricher(SentryOptions options)
+            eventLike.User.IpAddress ??= DefaultIpAddress;
+        }
+        // Set by the GlobalRootScopeIntegration in global mode so that it can be overridden by the user.
+        // In non-global mode (e.g. ASP.NET Core) the enricher sets it here as a fallback.
+        if (!_options.IsGlobalModeEnabled)
         {
-            _options = options;
+            eventLike.User.Id ??= _options.InstallationId;
         }
 
-        public void Apply(IEventLike eventLike)
-        {
-            // Runtime
-            if (!eventLike.Contexts.ContainsKey(Runtime.Type))
-            {
-                eventLike.Contexts[Runtime.Type] = _runtimeLazy.Value;
-            }
-
-            // Operating System
-            if (!eventLike.Contexts.ContainsKey(OperatingSystem.Type))
-            {
-                // RuntimeInformation.OSDescription is throwing on Mono 5.12
-                if (!PlatformAbstractions.Runtime.Current.IsMono())
-                {
-                    eventLike.Contexts.OperatingSystem.RawDescription = RuntimeInformation.OSDescription;
-                }
-            }
-
-            // SDK
-            // SDK Name/Version might have be already set by an outer package
-            // e.g: ASP.NET Core can set itself as the SDK
-            if (eventLike.Sdk.Version is null && eventLike.Sdk.Name is null)
-            {
-                eventLike.Sdk.Name = Constants.SdkName;
-                eventLike.Sdk.Version = _sdkVersionLazy.Value.Version;
-            }
-
-            if (_sdkVersionLazy.Value.Version is not null)
-            {
-                eventLike.Sdk.AddPackage("nuget:" + _sdkVersionLazy.Value.Name, _sdkVersionLazy.Value.Version);
-            }
-
-            // Platform
-            eventLike.Platform ??= Sentry.Constants.Platform;
-
-            // Release
-            eventLike.Release ??= _options.Release ?? _releaseLazy.Value;
-
-            // Environment
-            if (string.IsNullOrWhiteSpace(eventLike.Environment))
-            {
-                var foundEnvironment = EnvironmentLocator.Locate();
-                eventLike.Environment = string.IsNullOrWhiteSpace(foundEnvironment)
-                    ? string.IsNullOrWhiteSpace(_options.Environment)
-                        ? Constants.ProductionEnvironmentSetting
-                        : _options.Environment
-                    : foundEnvironment;
-            }
-
-            // User
-            // Report local user if opt-in PII, no user was already set to event and feature not opted-out:
-            if (_options.SendDefaultPii)
-            {
-                if (_options.IsEnvironmentUser && !eventLike.HasUser())
-                {
-                    eventLike.User.Username = Environment.UserName;
-                }
-
-                eventLike.User.IpAddress ??= "{{auto}}";
-            }
-
-            //Apply App startup and Boot time
-            eventLike.Contexts.App.StartTime ??= ProcessInfo.Instance?.StartupTime;
-            eventLike.Contexts.Device.BootTime ??= ProcessInfo.Instance?.BootTime;
-
-            // Default tags
-            _options.ApplyDefaultTags(eventLike);
-        }
+        eventLike.Contexts.App.StartTime ??= ProcessInfo.Instance?.StartupTime;
+        eventLike.Contexts.App.InForeground = ProcessInfo.Instance?.ApplicationIsActivated(_options);
     }
+
+    public void Apply(SentryCheckIn checkIn, Scope? scope) => _options.ScopeDefaults.Apply(checkIn, scope);
 }

@@ -1,23 +1,19 @@
-using System.Runtime.Serialization;
+namespace Sentry.Protocol;
 
-// ReSharper disable once CheckNamespace
-namespace Sentry.Protocol
+/// <summary>
+/// Defines the orientation of a device.
+/// </summary>
+public enum DeviceOrientation
 {
     /// <summary>
-    /// Defines the orientation of a device.
+    /// Portrait.
     /// </summary>
-    public enum DeviceOrientation
-    {
-        /// <summary>
-        /// Portrait.
-        /// </summary>
-        [EnumMember(Value = "portrait")]
-        Portrait,
+    [EnumMember(Value = "portrait")]
+    Portrait,
 
-        /// <summary>
-        /// Landscape.
-        /// </summary>
-        [EnumMember(Value = "landscape")]
-        Landscape
-    }
+    /// <summary>
+    /// Landscape.
+    /// </summary>
+    [EnumMember(Value = "landscape")]
+    Landscape
 }

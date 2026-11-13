@@ -1,293 +1,359 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using NSubstitute;
-using Sentry.Extensibility;
-using Sentry.Internal;
-using Sentry.Protocol;
-using Xunit;
+namespace Sentry.Tests.Internals;
 
-namespace Sentry.Tests.Internals
+public partial class MainExceptionProcessorTests
 {
-    public class MainExceptionProcessorTests
+    private class Fixture
     {
-        private class Fixture
+        public ISentryStackTraceFactory SentryStackTraceFactory { get; set; } = Substitute.For<ISentryStackTraceFactory>();
+        public SentryOptions SentryOptions { get; set; } = new();
+        public MainExceptionProcessor GetSut() => new(SentryOptions, () => SentryStackTraceFactory);
+    }
+
+    private readonly Fixture _fixture = new();
+
+    [Fact]
+    public void Process_ExceptionsWithoutData_MechanismDataIsMinimal()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var ex = GetHandledException();
+
+        sut.Process(ex, evt);
+
+        var sentryException = evt.SentryExceptions!.Single();
+
+        // All managed exceptions has an HResult, at a bare minimum (which we store in the Mechanism.Data)
+        sentryException.Mechanism!.Data.Should().BeEquivalentTo(new Dictionary<string, string>()
         {
-            public ISentryStackTraceFactory SentryStackTraceFactory { get; set; } = Substitute.For<ISentryStackTraceFactory>();
-            public SentryOptions SentryOptions { get; set; } = new();
-            public MainExceptionProcessor GetSut() => new(SentryOptions, () => SentryStackTraceFactory);
+            ["HResult"] = "0x80131500" // The default value of HRESULT for managed exceptions (COR_E_EXCEPTION)
+        });
+    }
+
+    [Fact]
+    public void Process_ExceptionsWithData_MechanismDataIsPopulated()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var ex = GetHandledException();
+        ex.Data["foo"] = 123;
+        ex.Data["bar"] = 456;
+
+        sut.Process(ex, evt);
+
+        var sentryException = evt.SentryExceptions!.Single();
+        var data = sentryException.Mechanism!.Data;
+
+        Assert.Contains(data, pair => pair.Key == "foo" && pair.Value.Equals(123));
+        Assert.Contains(data, pair => pair.Key == "bar" && pair.Value.Equals(456));
+    }
+
+    [Fact]
+    public void Process_StackTraceFactoryThrows_KeepsExceptionWithoutStackTrace()
+    {
+        var factoryException = new InvalidOperationException("factory failed");
+        _fixture.SentryStackTraceFactory.Create(Arg.Any<Exception>()).Throws(factoryException);
+        _fixture.SentryOptions.AddDiagnosticLoggerSubstitute();
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+
+        sut.Process(new InvalidOperationException("captured"), evt);
+
+        var sentryException = evt.SentryExceptions.Should().ContainSingle().Subject;
+        sentryException.Type.Should().Be(typeof(InvalidOperationException).FullName);
+        sentryException.Value.Should().Be("captured");
+        sentryException.Stacktrace.Should().BeNull();
+        _fixture.SentryOptions.ReceivedLogError(factoryException, "Stack trace factory {0} threw an exception. The stack trace will be omitted.");
+    }
+
+    [Fact]
+    public void Process_ExceptionWithout_Handled()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var exp = new Exception();
+
+        sut.Process(exp, evt);
+
+        // No integration set the flag, so this was captured by user code, which counts as handled.
+        Assert.NotNull(evt.SentryExceptions);
+        Assert.Single(evt.SentryExceptions, p => p.Mechanism?.Handled == true);
+    }
+
+    [Fact]
+    public void Process_ExceptionWith_HandledFalse()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var exp = new Exception();
+
+        exp.Data.Add(Mechanism.HandledKey, false);
+
+        sut.Process(exp, evt);
+
+        Assert.NotNull(evt.SentryExceptions);
+        Assert.Single(evt.SentryExceptions, p => p.Mechanism?.Handled == false);
+    }
+
+    [Fact]
+    public void Process_ExceptionWith_HandledTrue()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var exp = new Exception();
+
+        exp.Data.Add(Mechanism.HandledKey, true);
+
+        sut.Process(exp, evt);
+
+        Assert.NotNull(evt.SentryExceptions);
+        Assert.Single(evt.SentryExceptions, p => p.Mechanism?.Handled == true);
+    }
+
+    [Fact]
+    public void Process_ExceptionWith_HandledTrue_WhenCaught()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var exp = GetHandledException();
+
+        sut.Process(exp, evt);
+
+        Assert.NotNull(evt.SentryExceptions);
+        Assert.Single(evt.SentryExceptions, p => p.Mechanism?.Handled == true);
+    }
+
+    [Fact]
+    public void Process_ExceptionWith_TerminalTrue_StoresInMechanismData()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var exp = new Exception();
+
+        exp.SetSentryMechanism("TestException", terminal: true);
+
+        sut.Process(exp, evt);
+
+        Assert.NotNull(evt.SentryExceptions);
+        var sentryException = evt.SentryExceptions.Single();
+        Assert.NotNull(sentryException.Mechanism?.Terminal);
+        Assert.True(sentryException.Mechanism?.Terminal);
+    }
+
+    [Fact]
+    public void Process_ExceptionWith_TerminalFalse_StoresInMechanismData()
+    {
+        var sut = _fixture.GetSut();
+        var evt = new SentryEvent();
+        var exp = new Exception();
+
+        exp.SetSentryMechanism("TestException", terminal: false);
+
+        sut.Process(exp, evt);
+
+        Assert.NotNull(evt.SentryExceptions);
+        var sentryException = evt.SentryExceptions.Single();
+        Assert.False(sentryException.Mechanism?.Terminal);
+    }
+
+    [Fact]
+    public void CreateSentryException_DataHasObjectAsKey_ItemIgnored()
+    {
+        var sut = _fixture.GetSut();
+        var ex = new Exception
+        {
+            Data = { [new object()] = new object() }
+        };
+
+        var actual = sut.CreateSentryExceptions(ex).Single();
+
+        // The custom data won't be added, but the mechanism data will still contain an HResult.
+        // We add the HResult for all exceptions
+        actual.Mechanism!.Data.Should().BeEquivalentTo(new Dictionary<string, string>()
+        {
+            ["HResult"] = "0x80131500" // The default value of HRESULT for managed exceptions (COR_E_EXCEPTION)
+        });
+
+    }
+
+    [Fact]
+    public void Process_AggregateException()
+    {
+        var sut = _fixture.GetSut();
+        _fixture.SentryStackTraceFactory = _fixture.SentryOptions.SentryStackTraceFactory;
+        var evt = new SentryEvent();
+        sut.Process(BuildAggregateException(), evt);
+
+        var last = evt.SentryExceptions!.Last();
+        // TODO: Create integration test to test this behaviour when publishing AOT apps
+        // See https://github.com/getsentry/sentry-dotnet/issues/2772
+        Assert.NotNull(last.Stacktrace);
+        var mechanism = last.Mechanism;
+        Assert.NotNull(mechanism);
+        Assert.False(mechanism.Handled);
+        Assert.NotNull(mechanism.Type);
+        Assert.NotEmpty(mechanism.Data);
+    }
+
+    private static AggregateException BuildAggregateException()
+    {
+        try
+        {
+            // Throwing will put a stack trace on the exception
+            throw new AggregateException("One or more errors occurred.",
+                new Exception("Inner message1"),
+                new Exception("Inner message2"));
         }
-
-        private readonly Fixture _fixture = new();
-
-        [Fact]
-        public void Process_ExceptionAndEventWithoutExtra_ExtraIsEmpty()
+        catch (AggregateException exception)
         {
-            var sut = _fixture.GetSut();
-            var evt = new SentryEvent();
-            sut.Process(new Exception(), evt);
-
-            Assert.Empty(evt.Extra);
+            // Add extra data to test fully
+            exception.Data[Mechanism.HandledKey] = false;
+            exception.Data[Mechanism.MechanismKey] = "AppDomain.UnhandledException";
+            exception.Data["foo"] = "bar";
+            return exception;
         }
+    }
 
-        [Fact]
-        public void Process_ExceptionsWithoutData_ExtraIsEmpty()
-        {
-            var sut = _fixture.GetSut();
-            var evt = new SentryEvent();
-            sut.Process(new Exception("ex", new Exception()), evt);
+    [Fact]
+    public void Process_HasTagsOnExceptionData_TagsSet()
+    {
+        //Assert
+        var sut = _fixture.GetSut();
+        var expectedTag1 = new KeyValuePair<string, string>("Tag1", "1234");
+        var expectedTag2 = new KeyValuePair<string, string>("Tag2", "4321");
 
-            Assert.Empty(evt.Extra);
-        }
+        var ex = new Exception();
+        var evt = new SentryEvent();
 
-        [Fact]
-        public void Process_EventAndExceptionHaveExtra_DataCombined()
-        {
-            const string expectedKey = "extra";
-            const int expectedValue = 1;
+        //Act
+        ex.AddSentryTag(expectedTag1.Key, expectedTag1.Value);
+        ex.AddSentryTag(expectedTag2.Key, expectedTag2.Value);
+        sut.Process(ex, evt);
 
-            var sut = _fixture.GetSut();
+        //Assert
+        Assert.Single(evt.Tags, expectedTag1);
+        Assert.Single(evt.Tags, expectedTag2);
+    }
 
-            var evt = new SentryEvent();
-            evt.SetExtra(expectedKey, expectedValue);
+    [Fact]
+    public void Process_HasInvalidExceptionTagsValue_TagsSetWithInvalidValue()
+    {
+        //Assert
+        var sut = _fixture.GetSut();
+        var invalidTag1 = new KeyValuePair<string, int>("Tag1", 1234);
+        var invalidTag2 = new KeyValuePair<string, int?>("Tag2", null);
+        var invalidTag3 = new KeyValuePair<string, string>("", "abcd");
 
-            var ex = new Exception();
-            ex.Data.Add("other extra", 2);
+        var expectedTag1 = new KeyValuePair<string, object>("Exception[0][sentry:tag:Tag1]", 1234);
+        var expectedTag2 = new KeyValuePair<string, object>("Exception[0][sentry:tag:Tag2]", null);
+        var expectedTag3 = new KeyValuePair<string, object>("Exception[0][sentry:tag:]", "abcd");
 
-            sut.Process(ex, evt);
+        var ex = new Exception();
+        var evt = new SentryEvent();
 
-            Assert.Equal(2, evt.Extra.Count);
-            Assert.Contains(evt.Extra, p => p.Key == expectedKey && (int)p.Value == expectedValue);
-        }
+        //Act
+        ex.Data.Add($"{MainExceptionProcessor.ExceptionDataTagKey}{invalidTag1.Key}", invalidTag1.Value);
+        ex.Data.Add($"{MainExceptionProcessor.ExceptionDataTagKey}{invalidTag2.Key}", invalidTag2.Value);
+        ex.AddSentryTag(invalidTag3.Key, invalidTag3.Value);
 
-        [Fact]
-        public void Process_EventHasNoExtrasExceptionDoes_DataInEvent()
-        {
-            const string expectedKey = "extra";
-            const int expectedValue = 1;
+        sut.Process(ex, evt);
 
-            var sut = _fixture.GetSut();
+        //Assert
+        Assert.Single(evt.Extra, expectedTag1);
+        Assert.Single(evt.Extra, expectedTag2);
+        Assert.Single(evt.Extra, expectedTag3);
+    }
 
-            var evt = new SentryEvent();
-
-            var ex = new Exception();
-            ex.Data.Add(expectedKey, expectedValue);
-
-            sut.Process(ex, evt);
-
-            var actual = Assert.Single(evt.Extra);
-
-            Assert.Equal($"Exception[0][{expectedKey}]", actual.Key);
-            Assert.Equal(expectedValue, (int)actual.Value!);
-        }
-
-        [Fact]
-        public void Process_EventHasExtrasExceptionDoesnt_NotModified()
-        {
-            var sut = _fixture.GetSut();
-            var evt = new SentryEvent();
-            evt.SetExtra("extra", 1);
-            var expected = evt.Extra;
-
-            var ex = new Exception();
-
-            sut.Process(ex, evt);
-
-            Assert.Same(expected, evt.Extra);
-        }
-
-        [Fact]
-        public void Process_TwoExceptionsWithData_DataOnEventExtra()
-        {
-            var sut = _fixture.GetSut();
-            var evt = new SentryEvent();
-
-            var first = new Exception();
-            var firstValue = new object();
-            first.Data.Add("first", firstValue);
-            var second = new Exception("second", first);
-            var secondValue = new object();
-            second.Data.Add("second", secondValue);
-
-            sut.Process(second, evt);
-
-            Assert.Equal(2, evt.Extra.Count);
-            Assert.Contains(evt.Extra, e => e.Key == "Exception[0][first]" && e.Value == firstValue);
-            Assert.Contains(evt.Extra, e => e.Key == "Exception[1][second]" && e.Value == secondValue);
-        }
-
-        [Fact]
-        public void Process_ExceptionWithout_Handled()
-        {
-            var sut = _fixture.GetSut();
-            var evt = new SentryEvent();
-            var exp = new Exception();
-
-            sut.Process(exp, evt);
-
-            _ = Assert.Single(evt.SentryExceptions!.Where(p => p.Mechanism!.Handled == null));
-        }
-
-        [Fact]
-        public void Process_ExceptionWith_HandledTrue()
-        {
-            var sut = _fixture.GetSut();
-            var evt = new SentryEvent();
-            var exp = new Exception();
-
-            exp.Data.Add(Mechanism.HandledKey, true);
-            exp.Data.Add(Mechanism.MechanismKey, "Process_ExceptionWith_HandledTrue");
-
-            sut.Process(exp, evt);
-
-            _ = Assert.Single(evt.SentryExceptions!.Where(p => p.Mechanism!.Handled == true));
-        }
-
-        [Fact]
-        public void CreateSentryException_DataHasObjectAsKey_ItemIgnored()
-        {
-            var sut = _fixture.GetSut();
-            var ex = new Exception();
-            ex.Data[new object()] = new object();
-
-            var actual = sut.CreateSentryException(ex);
-
-            Assert.Empty(actual.Single().Data);
-        }
-
-        [Fact]
-        public void Process_HasTagsOnExceptionData_TagsSetted()
-        {
-            //Assert
-            var sut = _fixture.GetSut();
-            var expectedTag1 = new KeyValuePair<string, string>("Tag1", "1234");
-            var expectedTag2 = new KeyValuePair<string, string>("Tag2", "4321");
-
-            var ex = new Exception();
-            var evt = new SentryEvent();
-
-            //Act
-            ex.AddSentryTag(expectedTag1.Key, expectedTag1.Value);
-            ex.AddSentryTag(expectedTag2.Key, expectedTag2.Value);
-            sut.Process(ex, evt);
-
-            //Assert
-            Assert.Single(evt.Tags, expectedTag1);
-            Assert.Single(evt.Tags, expectedTag2);
-        }
-
-        [Fact]
-        public void Process_HasInvalidExceptionTagsValue_TagsSetWithInvalidValue()
-        {
-            //Assert
-            var sut = _fixture.GetSut();
-            var InvalidTag = new KeyValuePair<string, int>("Tag1", 1234);
-            var InvalidTag2 = new KeyValuePair<string, int?>("Tag2", null);
-            var InvalidTag3 = new KeyValuePair<string, string>("", "abcd");
-
-            var expectedTag = new KeyValuePair<string, object>("Exception[0][sentry:tag:Tag1]", 1234);
-            var expectedTag2 = new KeyValuePair<string, object>("Exception[0][sentry:tag:Tag2]", null);
-            var expectedTag3 = new KeyValuePair<string, object>("Exception[0][sentry:tag:]", "abcd");
-
-            var ex = new Exception();
-            var evt = new SentryEvent();
-
-            //Act
-            ex.Data.Add($"{MainExceptionProcessor.ExceptionDataTagKey}{InvalidTag.Key}", InvalidTag.Value);
-            ex.Data.Add($"{MainExceptionProcessor.ExceptionDataTagKey}{InvalidTag2.Key}", InvalidTag2.Value);
-            ex.AddSentryTag(InvalidTag3.Key, InvalidTag3.Value);
-
-            sut.Process(ex, evt);
-
-            //Assert
-            Assert.Single(evt.Extra, expectedTag);
-            Assert.Single(evt.Extra, expectedTag2);
-            Assert.Single(evt.Extra, expectedTag3);
-        }
-
-        [Fact]
-        public void Process_HasContextOnExceptionData_ContextSet()
-        {
-            //Assert
-            var sut = _fixture.GetSut();
-            var ex = new Exception();
-            var evt = new SentryEvent();
-            var expectedContext1 = new KeyValuePair<string, Dictionary<string, object>>("Context 1",
-                new Dictionary<string, object>
-                {
-                    { "Data1", new { a = 1, b = 2, c = "12345"} },
-                    { "Data2", "Something broke." }
-                });
-            var expectedContext2 = new KeyValuePair<string, Dictionary<string, object>>("Context 2",
-                new Dictionary<string, object>
-                {
-                    { "Data1", new { c = 1, d = 2, e = "12345"} },
-                    { "Data2", "Something broke again." }
-                });
-
-
-            //Act
-            ex.AddSentryContext(expectedContext1.Key, expectedContext1.Value);
-            ex.AddSentryContext(expectedContext2.Key, expectedContext2.Value);
-            sut.Process(ex, evt);
-
-            //Assert
-            Assert.Equal(evt.Contexts[expectedContext1.Key], expectedContext1.Value);
-            Assert.Equal(evt.Contexts[expectedContext2.Key], expectedContext2.Value);
-        }
-
-        [Fact]
-        public void Process_HasContextOnExceptionDataWithNullValue_ContextSetWithInvalidValue()
-        {
-            //Assert
-            var sut = _fixture.GetSut();
-            var ex = new Exception();
-            var evt = new SentryEvent();
-            var invalidContext = new KeyValuePair<string, Dictionary<string, object>>("Context 1", null);
-            var expectedContext = new KeyValuePair<string, object>("Exception[0][sentry:context:Context 1]", null);
-
-            var invalidContext2 = new KeyValuePair<string, Dictionary<string, object>>("",
+    [Fact]
+    public void Process_HasContextOnExceptionData_ContextSet()
+    {
+        //Assert
+        var sut = _fixture.GetSut();
+        var ex = new Exception();
+        var evt = new SentryEvent();
+        var expectedContext1 = new KeyValuePair<string, Dictionary<string, object>>("Context 1",
             new Dictionary<string, object>
             {
-                            { "Data3", new { c = 1, d = 2, e = "12345"} },
-                            { "Data4", "Something broke again." }
+                { "Data1", new { a = 1, b = 2, c = "12345"} },
+                { "Data2", "Something broke." }
             });
-            var expectedContext2 = new KeyValuePair<string, object>("Exception[0][sentry:context:]", invalidContext2.Value);
+        var expectedContext2 = new KeyValuePair<string, Dictionary<string, object>>("Context 2",
+            new Dictionary<string, object>
+            {
+                { "Data1", new { c = 1, d = 2, e = "12345"} },
+                { "Data2", "Something broke again." }
+            });
 
-            //Act
-            ex.AddSentryContext(invalidContext.Key, invalidContext.Value);
-            ex.AddSentryContext(invalidContext2.Key, invalidContext2.Value);
-            sut.Process(ex, evt);
+        //Act
+        ex.AddSentryContext(expectedContext1.Key, expectedContext1.Value);
+        ex.AddSentryContext(expectedContext2.Key, expectedContext2.Value);
+        sut.Process(ex, evt);
 
-            //Assert
-            Assert.Single(evt.Extra, expectedContext);
-            Assert.Single(evt.Extra, expectedContext2);
-        }
+        //Assert
+        Assert.Equal(evt.Contexts[expectedContext1.Key], expectedContext1.Value);
+        Assert.Equal(evt.Contexts[expectedContext2.Key], expectedContext2.Value);
+    }
 
-        [Fact]
-        public void Process_HasUnsuportedExceptionValue_ValueSetAsExtra()
+    [Fact]
+    public void Process_HasContextOnExceptionDataWithNullValue_ContextSetWithInvalidValue()
+    {
+        //Assert
+        var sut = _fixture.GetSut();
+        var ex = new Exception();
+        var evt = new SentryEvent();
+        var invalidContext = new KeyValuePair<string, Dictionary<string, object>>("Context 1", null);
+        var expectedContext = new KeyValuePair<string, object>("Exception[0][sentry:context:Context 1]", null);
+
+        var invalidContext2 = new KeyValuePair<string, Dictionary<string, object>>("",
+            new Dictionary<string, object>
+            {
+                { "Data3", new { c = 1, d = 2, e = "12345"} },
+                { "Data4", "Something broke again." }
+            });
+        var expectedContext2 = new KeyValuePair<string, object>("Exception[0][sentry:context:]", invalidContext2.Value);
+
+        //Act
+        ex.AddSentryContext(invalidContext.Key, invalidContext.Value);
+        ex.AddSentryContext(invalidContext2.Key, invalidContext2.Value);
+        sut.Process(ex, evt);
+
+        //Assert
+        Assert.Single(evt.Extra, expectedContext);
+        Assert.Single(evt.Extra, expectedContext2);
+    }
+
+    [Fact]
+    public void Process_HasUnsupportedExceptionValue_ValueSetAsExtra()
+    {
+        //Assert
+        var sut = _fixture.GetSut();
+        var invalidData1 = new KeyValuePair<string, string>("sentry:attachment:filename", "./path");
+        var invalidData2 = new KeyValuePair<string, int?>("sentry:unsupported:value", null);
+
+        var expectedData = new KeyValuePair<string, object>($"Exception[0][{invalidData1.Key}]", invalidData1.Value);
+        var expectedData2 = new KeyValuePair<string, object>($"Exception[0][{invalidData2.Key}]", invalidData2.Value);
+
+        var ex = new Exception();
+        var evt = new SentryEvent();
+
+        //Act
+        ex.Data.Add(invalidData1.Key, invalidData1.Value);
+        ex.Data.Add(invalidData2.Key, invalidData2.Value);
+        sut.Process(ex, evt);
+
+        //Assert
+        Assert.Single(evt.Extra, expectedData);
+        Assert.Single(evt.Extra, expectedData2);
+    }
+
+    private Exception GetHandledException()
+    {
+        try
         {
-            //Assert
-            var sut = _fixture.GetSut();
-            var InvalidData = new KeyValuePair<string, string>("sentry:attachment:filename", "./path");
-            var InvalidData2 = new KeyValuePair<string, int?>("sentry:unsupported:value", null);
-
-            var expectedData = new KeyValuePair<string, object>($"Exception[0][{InvalidData.Key}]", InvalidData.Value);
-            var expectedData2 = new KeyValuePair<string, object>($"Exception[0][{InvalidData2.Key}]", InvalidData2.Value);
-
-            var ex = new Exception();
-            var evt = new SentryEvent();
-
-            //Act
-            ex.Data.Add(InvalidData.Key, InvalidData.Value);
-            ex.Data.Add(InvalidData2.Key, InvalidData2.Value);
-            sut.Process(ex, evt);
-
-            //Assert
-            Assert.Single(evt.Extra, expectedData);
-            Assert.Single(evt.Extra, expectedData2);
+            throw new Exception();
         }
-
-        // TODO: Test when the approach for parsing is finalized
+        catch (Exception exception)
+        {
+            return exception;
+        }
     }
 }

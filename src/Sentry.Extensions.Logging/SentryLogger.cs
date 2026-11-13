@@ -1,148 +1,256 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using Microsoft.Extensions.Logging;
+using Sentry.Extensibility;
 using Sentry.Infrastructure;
+using Sentry.Internal;
+using Sentry.Reflection;
 
-namespace Sentry.Extensions.Logging
+namespace Sentry.Extensions.Logging;
+
+internal sealed class SentryLogger : ILogger
 {
-    internal sealed class SentryLogger : ILogger
+    private static readonly SentryPackage? Package = typeof(SentryLogger).Assembly.GetNuGetPackage();
+
+    private readonly IHub _hub;
+    private readonly ISystemClock _clock;
+    private readonly SentryLoggingOptions _options;
+    private readonly UninitializedSdkWarning _uninitializedSdkWarning;
+
+    internal string CategoryName { get; }
+
+    internal const string UninitializedSdkMessage =
+        "Sentry: the Microsoft.Extensions.Logging integration dropped a log event because Sentry is not " +
+        "initialized, but a DSN was found in the environment or in an assembly attribute. The logging " +
+        "integration no longer initializes the SDK: call SentrySdk.Init (or UseSentry via one of the " +
+        "integrations) at startup. See https://docs.sentry.io/platforms/dotnet/guides/extensions-logging/";
+
+    internal SentryLogger(
+        string categoryName,
+        SentryLoggingOptions options,
+        ISystemClock clock,
+        IHub hub,
+        UninitializedSdkWarning? uninitializedSdkWarning = null)
     {
-        private readonly IHub _hub;
-        private readonly ISystemClock _clock;
-        private readonly SentryLoggingOptions _options;
+        CategoryName = categoryName;
+        _options = options;
+        _clock = clock;
+        _hub = hub;
+        _uninitializedSdkWarning = uninitializedSdkWarning ?? new UninitializedSdkWarning();
+    }
 
-        internal string CategoryName { get; }
+#if NET8_0_OR_GREATER
+    public IDisposable BeginScope<TState>(TState state) where TState : notnull
+        => _hub.PushScope(state);
+#else
+    public IDisposable BeginScope<TState>(TState state) => _hub.PushScope(state);
+#endif
 
-        internal SentryLogger(
-            string categoryName,
-            SentryLoggingOptions options,
-            ISystemClock clock,
-            IHub hub)
+    public bool IsEnabled(LogLevel logLevel) => _hub.IsEnabled && IsEnabledForLevel(logLevel);
+
+    private bool IsEnabledForLevel(LogLevel logLevel)
+        => logLevel != LogLevel.None
+           && (logLevel >= _options.MinimumBreadcrumbLevel
+               || logLevel >= _options.MinimumEventLevel);
+
+    public void Log<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string>? formatter)
+    {
+        if (!_hub.IsEnabled)
         {
-            CategoryName = categoryName;
-            _options = options;
-            _clock = clock;
-            _hub = hub;
+            if (WouldCaptureEvent(logLevel, eventId, exception))
+            {
+                _uninitializedSdkWarning.WarnOnce(UninitializedSdkMessage);
+            }
+
+            return;
         }
 
-        public IDisposable BeginScope<TState>(TState state) => _hub.PushScope(state);
-
-        public bool IsEnabled(LogLevel logLevel)
-            => _hub.IsEnabled
-                && logLevel != LogLevel.None
-                && (logLevel >= _options.MinimumBreadcrumbLevel
-                || logLevel >= _options.MinimumEventLevel);
-
-        public void Log<TState>(
-            LogLevel logLevel,
-            EventId eventId,
-            TState state,
-            Exception? exception,
-            Func<TState, Exception?, string>? formatter)
+        if (!IsEnabledForLevel(logLevel))
         {
-            if (!IsEnabled(logLevel))
+            return;
+        }
+
+        if (IsFromSentry() || IsEfExceptionMessage(eventId) || IsFiltered(logLevel, eventId, exception))
+        {
+            return;
+        }
+
+        var message = formatter?.Invoke(state, exception);
+
+        if (ShouldCaptureEvent(logLevel))
+        {
+            var @event = CreateEvent(logLevel, eventId, state, exception, message, CategoryName);
+
+            _ = _hub.CaptureEvent(@event);
+
+            // Capturing exception events adds a breadcrumb automatically... we don't want to add another one
+            if (exception != null)
             {
                 return;
             }
+        }
 
-            var message = formatter?.Invoke(state, exception);
+        if (ShouldAddBreadcrumb(logLevel))
+        {
+            var data = eventId.ToDictionaryOrNull();
 
-            if (ShouldCaptureEvent(logLevel, eventId, exception))
+            if (exception != null && message != null)
             {
-                var @event = new SentryEvent(exception)
-                {
-                    Logger = CategoryName,
-                    Message = message,
-                    Level = logLevel.ToSentryLevel()
-                };
-
-                if (state is IEnumerable<KeyValuePair<string, object>> pairs)
-                {
-                    foreach (var property in pairs)
-                    {
-                        if (property.Key == "{OriginalFormat}" && property.Value is string template)
-                        {
-                            // Original format found, use Sentry logEntry interface
-                            @event.Message = new SentryMessage
-                            {
-                                Formatted = message,
-                                Message = template
-                            };
-                            continue;
-                        }
-
-                        if (property.Value is string tagValue)
-                        {
-                            @event.SetTag(property.Key, tagValue);
-                        }
-                    }
-                }
-
-                var tuple = eventId.ToTupleOrNull();
-                if (tuple.HasValue)
-                {
-                    @event.SetTag(tuple.Value.name, tuple.Value.value);
-                }
-
-                _ = _hub.CaptureEvent(@event);
+                // Exception.Message won't be used as Breadcrumb message
+                // Avoid losing it by adding as data:
+                data ??= new Dictionary<string, string>();
+                data.Add("exception_message", exception.Message);
             }
 
-            // Even if it was sent as event, add breadcrumb so next event includes it
-            if (ShouldAddBreadcrumb(logLevel, eventId, exception))
-            {
-                var data = eventId.ToDictionaryOrNull();
+            _hub.AddBreadcrumb(
+                _clock,
+                (message ?? exception?.Message)!,
+                CategoryName,
+                null,
+                data,
+                logLevel.ToBreadcrumbLevel(),
+                exception.ToHint());
+        }
+    }
 
-                if (exception != null && message != null)
+    internal static SentryEvent CreateEvent<TState>(
+        LogLevel logLevel,
+        EventId id,
+        TState state,
+        Exception? exception,
+        string? message,
+        string category)
+    {
+        exception?.SetSentryMechanism("SentryLogger", handled: !IsUnhandledWasmException(id));
+        var @event = new SentryEvent(exception)
+        {
+            Logger = category,
+            Message = message,
+            Level = logLevel.ToSentryLevel(),
+        };
+
+        if (Package is not null)
+        {
+            @event.Sdk.AddPackage(Package);
+        }
+
+        if (state is IEnumerable<KeyValuePair<string, object>> pairs)
+        {
+            foreach (var property in pairs)
+            {
+                if (property.Key == "{OriginalFormat}" && property.Value is string template)
                 {
-                    // Exception.Message won't be used as Breadcrumb message
-                    // Avoid losing it by adding as data:
-                    data ??= new Dictionary<string, string>();
-                    data.Add("exception_message", exception.Message);
+                    // Original format found, use Sentry logEntry interface
+                    @event.Message = new SentryMessage
+                    {
+                        Formatted = message,
+                        Message = template
+                    };
+                    continue;
                 }
 
-                _hub.AddBreadcrumb(
-                    _clock,
-                    message ?? exception?.Message!,
-                    CategoryName,
-                    null,
-                    data,
-                    logLevel.ToBreadcrumbLevel());
+                switch (property.Value)
+                {
+                    case string stringTagValue:
+                        @event.SetTag(property.Key, stringTagValue);
+                        break;
+
+                    case Guid guidTagValue when guidTagValue != Guid.Empty:
+                        @event.SetTag(property.Key, guidTagValue.ToString());
+                        break;
+
+                    case Enum enumValue:
+                        @event.SetTag(property.Key, enumValue.ToString());
+                        break;
+
+                    default:
+                        {
+                            if (property.Value?.GetType().IsPrimitive == true)
+                            {
+                                @event.SetTag(property.Key, Convert.ToString(property.Value, CultureInfo.InvariantCulture)!);
+                            }
+                            break;
+                        }
+                }
             }
         }
 
-        private bool ShouldCaptureEvent(
-            LogLevel logLevel,
-            EventId eventId,
-            Exception? exception)
-                => _options.MinimumEventLevel != LogLevel.None
-                   && logLevel >= _options.MinimumEventLevel
-                   // No events from Sentry code using ILogger
-                   // A type from the main SDK could be used to resolve a logger
-                   // hence 'Sentry' and also 'Sentry.', won't block SentrySomething
-                   // often used by users experimenting with Sentry
-                   && !CategoryName.StartsWith("Sentry.", StringComparison.Ordinal)
-                   && !string.Equals(CategoryName, "Sentry", StringComparison.Ordinal)
-                   && _options.Filters.All(
-                       f => !f.Filter(
-                           CategoryName,
-                           logLevel,
-                           eventId,
-                           exception));
+        var tuple = id.ToTupleOrNull();
+        if (tuple.HasValue)
+        {
+            @event.SetTag(tuple.Value.name, tuple.Value.value);
+        }
 
-        private bool ShouldAddBreadcrumb(
-            LogLevel logLevel,
-            EventId eventId,
-            Exception? exception)
-            => _options.MinimumBreadcrumbLevel != LogLevel.None
-               && logLevel >= _options.MinimumBreadcrumbLevel
-               && _options.Filters.All(
-                   f => !f.Filter(
-                       CategoryName,
-                       logLevel,
-                       eventId,
-                       exception))
-               && !CategoryName.StartsWith("Sentry.", StringComparison.Ordinal)
-               && !string.Equals(CategoryName, "Sentry", StringComparison.Ordinal);
+        return @event;
+    }
+
+    private bool ShouldCaptureEvent(LogLevel logLevel)
+        => _options.MinimumEventLevel != LogLevel.None
+           && logLevel >= _options.MinimumEventLevel;
+
+    private bool WouldCaptureEvent(LogLevel logLevel, EventId eventId, Exception? exception)
+        => logLevel != LogLevel.None
+           && ShouldCaptureEvent(logLevel)
+           && !IsFromSentry()
+           && !IsEfExceptionMessage(eventId)
+           && !IsFiltered(logLevel, eventId, exception);
+
+    private bool ShouldAddBreadcrumb(LogLevel logLevel)
+        => _options.MinimumBreadcrumbLevel != LogLevel.None
+           && logLevel >= _options.MinimumBreadcrumbLevel;
+
+    private bool IsFiltered(
+        LogLevel logLevel,
+        EventId eventId,
+        Exception? exception)
+    {
+        foreach (var filter in _options.Filters)
+        {
+            if (IsFiltered(filter, logLevel, eventId, exception))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsFiltered(
+        ILogEntryFilter filter,
+        LogLevel logLevel,
+        EventId eventId,
+        Exception? exception)
+    {
+        try
+        {
+            return filter.Filter(CategoryName, logLevel, eventId, exception);
+        }
+        catch (Exception e)
+        {
+            _hub.GetSentryOptions()?.LogError(e, "The {0} log filter callback failed. The log entry will be filtered out.", filter.GetType().Name);
+            return true;
+        }
+    }
+
+
+    private bool IsFromSentry() => SentrySdkNamespaces.IsSentrySdk(CategoryName);
+
+    internal static bool IsEfExceptionMessage(EventId eventId)
+    {
+        return eventId.Name is
+                "Microsoft.EntityFrameworkCore.Update.SaveChangesFailed" or
+                "Microsoft.EntityFrameworkCore.Query.QueryIterationFailed" or
+                "Microsoft.EntityFrameworkCore.Query.InvalidIncludePathError" or
+                "Microsoft.EntityFrameworkCore.Update.OptimisticConcurrencyException";
+    }
+
+    internal static bool IsUnhandledWasmException(EventId eventId)
+    {
+        return eventId.Name is
+                "ExceptionRenderingComponent" or
+                "NavigationFailed";
     }
 }

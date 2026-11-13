@@ -1,150 +1,153 @@
-using System;
 using NLog;
 using NLog.Config;
 using NLog.Targets;
 using Sentry.NLog;
 
 // ReSharper disable ConvertToConstant.Local
-namespace Sentry.Samples.NLog
+namespace Sentry.Samples.NLog;
+
+public static class Program
 {
-    public static class Program
+    // Modify the configuration file NLog.config to affect 'UsingNLogConfigFile'
+
+    private static void Main()
     {
-        // Modify the configuration file NLog.config to affect 'UsingNLogConfigFile'
-
-        // DSN used by the example: 'UsingCodeConfiguration'.
-        // #### ADD YOUR DSN HERE:
-        private static readonly string DsnSample = "https://80aed643f81249d4bed3e30687b310ab@o447951.ingest.sentry.io/5428537";
-
-        private static void Main()
+        // Initialise the Sentry SDK
+        using var _ = SentrySdk.Init(options =>
         {
-            try
-            {
-                // You can configure your logger using a configuration file:
-                UsingNLogConfigFile();
+#if !SENTRY_DSN_DEFINED_IN_ENV
+            // A DSN is required. You can set here in code, or you can set it in the SENTRY_DSN environment variable.
+            // See https://docs.sentry.io/product/sentry-basics/dsn-explainer/
+            options.Dsn = SamplesShared.Dsn;
+#endif
+            options.AttachStacktrace = true;
+            options.SendDefaultPii = true; // Send Personal Identifiable information like the username of the user logged in to the device
+        });
 
-                // Or you can configure it with code:
-                UsingCodeConfiguration();
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
-            }
-            finally
-            {
-                LogManager.Shutdown();
-            }
+        try
+        {
+            // You can configure your logger using a configuration file:
+            UsingNLogConfigFile();
+
+            // Or you can configure it with code:
+            UsingCodeConfiguration();
         }
-
-        private static void DemoLogger(ILogger logger)
+        catch (Exception e)
         {
-            // Here is an example of how you can set user properties in code via NLog. The layout is configured to use these values for the sentry user
-            using (MappedDiagnosticsLogicalContext.SetScoped("id", "myId"))
-            using (MappedDiagnosticsLogicalContext.SetScoped("username", "userNumberOne"))
-            using (MappedDiagnosticsLogicalContext.SetScoped("email", "theCoolest@sample.com"))
-            {
-                // Minimum Breadcrumb and Event log levels are set to levels higher than Trace.
-                // In this case, Trace messages are ignored
-                logger.Trace("Verbose message which is not sent.");
-
-                // Minimum Breadcrumb level is set to Debug so the following message is stored in memory and sent
-                // with following events of the same Scope
-                logger.Debug("Debug message stored as breadcrumb.");
-
-                // Sends an event and stores the message as a breadcrumb too, to be sent with any upcoming events.
-                logger.Error("Some event that includes the previous breadcrumbs. mood = {mood}", "happy that my error is reported");
-
-                try
-                {
-                    DoWork(logger);
-                }
-                catch (Exception e)
-                {
-                    e.Data.Add("details", "DoWork always throws.");
-                    logger.Fatal(e,
-                                 "Error: with exception. {data}",
-                                 new
-                                 {
-                                     title = "compound data object",
-                                     wowFactor = 11,
-                                     errorReported = true
-                                 });
-                    LogManager.Flush();
-                }
-            }
+            Console.WriteLine(e);
         }
-
-        private static void DoWork(ILogger logger)
+        finally
         {
-            int a = 0, b = 10;
-
-            logger.Info("Dividing {b} by {a}", b, a);
-
-            logger.Warn("a is 0");
-
-            _ = b / a;
-        }
-
-        private static void UsingNLogConfigFile()
-        {
-            // If using an NLog.config xml file, NLog will load the configuration automatically Or, if using a
-            // different file, you can call the following to load it for you: LogManager.Configuration = LogManager.LoadConfiguration("NLog.config").Configuration;
-
-            var logger = LogManager.GetCurrentClassLogger();
-
-            DemoLogger(logger);
-        }
-
-        private static void UsingCodeConfiguration()
-        {
-            // Other overloads exist, for example, configure the SDK with only the DSN or no parameters at all.
-            var config = LogManager.Configuration = new LoggingConfiguration();
-            _ = config
-                .AddSentry(o =>
-                {
-                    o.Layout = "${message}";
-                    o.BreadcrumbLayout = "${logger}: ${message}"; // Optionally specify a separate format for breadcrumbs
-
-                    o.MinimumBreadcrumbLevel = LogLevel.Debug; // Debug and higher are stored as breadcrumbs (default is Info)
-                    o.MinimumEventLevel = LogLevel.Error; // Error and higher is sent as event (default is Error)
-
-                    // If DSN is not set, the SDK will look for an environment variable called SENTRY_DSN. If
-                    // nothing is found, SDK is disabled.
-                    o.Dsn = DsnSample;
-
-                    o.AttachStacktrace = true;
-                    o.SendDefaultPii = true; // Send Personal Identifiable information like the username of the user logged in to the device
-
-                    o.IncludeEventDataOnBreadcrumbs = true; // Optionally include event properties with breadcrumbs
-                    o.ShutdownTimeoutSeconds = 5;
-
-                    //Optionally specify user properties via NLog (here using MappedDiagnosticsLogicalContext as an example)
-                    o.User = new SentryNLogUser
-                    {
-                        Id = "${mdlc:item=id}",
-                        Username = "${mdlc:item=username}",
-                        Email = "${mdlc:item=email}",
-                        Other =
-                        {
-                            new TargetPropertyWithContext("mood", "joyous")
-                        },
-                    };
-
-                    o.AddTag("logger", "${logger}");  // Send the logger name as a tag
-
-                    // Other configuration
-                });
-
-            config.AddTarget(new DebuggerTarget("debugger"));
-
-            config.AddTarget(new ColoredConsoleTarget("console"));
-            config.AddRuleForAllLevels("console");
-            config.AddRuleForAllLevels("debugger");
-
-            LogManager.Configuration = config;
-
-            var log = LogManager.GetCurrentClassLogger();
-            DemoLogger(log);
+            LogManager.Shutdown();
         }
     }
 
+    private static void DemoLogger(ILogger logger)
+    {
+        // Here is an example of how you can set user properties in code via NLog. The layout is configured to use these values for the sentry user
+        var properties = new Dictionary<string, string>
+        {
+            {"id", "myId"},
+            {"username", "userNumberOne"},
+            {"email", "theCoolest@sample.com"},
+            {"ipAddress", "127.0.0.1"}
+        };
+
+        using (ScopeContext.PushProperties(properties))
+        {
+            // Minimum Breadcrumb and Event log levels are set to levels higher than Trace.
+            // In this case, Trace messages are ignored
+            logger.Trace("Verbose message which is not sent.");
+
+            // Minimum Breadcrumb level is set to Debug so the following message is stored in memory and sent
+            // with following events of the same Scope
+            logger.Debug("Debug message stored as breadcrumb.");
+
+            // Sends an event and stores the message as a breadcrumb too, to be sent with any upcoming events.
+            logger.Error("Some event that includes the previous breadcrumbs. mood = {mood}", "happy that my error is reported");
+
+            try
+            {
+                DoWork(logger);
+            }
+            catch (Exception e)
+            {
+                e.Data.Add("details", "DoWork always throws.");
+                logger.Fatal(e,
+                    "Error: with exception. {data}",
+                    new
+                    {
+                        title = "compound data object",
+                        wowFactor = 11,
+                        errorReported = true
+                    });
+                LogManager.Flush();
+            }
+        }
+    }
+
+    private static void DoWork(ILogger logger)
+    {
+        int a = 0, b = 10;
+
+        logger.Info("Dividing {b} by {a}", b, a);
+
+        logger.Warn("a is 0");
+
+        _ = b / a;
+    }
+
+    private static void UsingNLogConfigFile()
+    {
+        // If using an NLog.config xml file, NLog will load the configuration automatically Or, if using a
+        // different file, you can call the following to load it for you: LogManager.Configuration = LogManager.LoadConfiguration("NLog.config").Configuration;
+
+        var logger = LogManager.GetCurrentClassLogger();
+
+        DemoLogger(logger);
+    }
+
+    private static void UsingCodeConfiguration()
+    {
+        // Configure NLog to send logs to Sentry
+        var config = LogManager.Configuration = new LoggingConfiguration();
+        _ = config
+            .AddSentry(options =>
+            {
+                options.Layout = "${message}";
+                options.BreadcrumbLayout = "${logger}: ${message}"; // Optionally specify a separate format for breadcrumbs
+
+                options.MinimumBreadcrumbLevel = LogLevel.Debug; // Debug and higher are stored as breadcrumbs (default is Info)
+                options.MinimumEventLevel = LogLevel.Error; // Error and higher are sent as events (default is Error)
+                options.MinimumLogLevel = LogLevel.Info; // Info and higher are sent as logs (default is Info)
+
+                options.IncludeEventDataOnBreadcrumbs = true; // Optionally include event properties with breadcrumbs
+
+                //Optionally specify user properties via NLog (here using MappedDiagnosticsLogicalContext as an example)
+                options.User = new SentryNLogUser
+                {
+                    Id = "${scopeproperty:item=id}",
+                    Username = "${scopeproperty:item=username}",
+                    Email = "${scopeproperty:item=email}",
+                    IpAddress = "${scopeproperty:item=ipAddress}",
+                    Other =
+                    {
+                        new TargetPropertyWithContext("mood", "joyous")
+                    },
+                };
+
+                options.AddTag("logger", "${logger}");  // Send the logger name as a tag
+            });
+
+        config.AddTarget(new DebuggerTarget("debugger"));
+
+        config.AddTarget(new ColoredConsoleTarget("console"));
+        config.AddRuleForAllLevels("console");
+        config.AddRuleForAllLevels("debugger");
+
+        LogManager.Configuration = config;
+
+        var log = LogManager.GetCurrentClassLogger();
+        DemoLogger(log);
+    }
 }

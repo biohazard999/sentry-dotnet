@@ -1,29 +1,29 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Running these tests on Mono just hangs -->
-  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
-    <TargetFrameworks>net461;$(TargetFrameworks)</TargetFrameworks>
-  </PropertyGroup>
-
   <PropertyGroup>
-    <TargetFrameworks>net5.0;netcoreapp3.1;netcoreapp2.1</TargetFrameworks>
+    <TargetFrameworks>$(CurrentTfms)</TargetFrameworks>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../src/Sentry.AspNetCore/Sentry.AspNetCore.csproj" />
-    <ProjectReference Include="../Sentry.Testing/Sentry.Testing.csproj" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(TargetFramework)' == 'netcoreapp2.1' OR '$(TargetFramework)' == 'net461'">
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="2.1.1" />
-    <PackageReference Include="Microsoft.AspNetCore.Diagnostics" Version="2.1.1" />
-    <PackageReference Include="Microsoft.AspNetCore" Version="2.1.7" />
+    <ProjectReference Include="..\..\src\Sentry.AspNetCore\Sentry.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\src\Sentry.Extensions.Hosting\Sentry.Extensions.Hosting.csproj" />
+    <ProjectReference Include="..\Sentry.AspNetCore.TestUtils\Sentry.AspNetCore.TestUtils.csproj" />
+    <ProjectReference Include="..\Sentry.Testing\Sentry.Testing.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <None Update="*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="IntegrationsTests.EventProcessor.cs">
+      <DependentUpon>IntegrationsTests.cs</DependentUpon>
+    </Compile>
+    <Compile Update="IntegrationsTests.BlockingDetection.cs">
+      <DependentUpon>IntegrationsTests.cs</DependentUpon>
+    </Compile>
   </ItemGroup>
 
 </Project>

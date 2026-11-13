@@ -1,46 +1,48 @@
-using System;
+using Sentry.Extensibility;
 using Sentry.Internal;
-using System.Runtime.ExceptionServices;
-using System.Security;
-using Sentry.Protocol;
 
-namespace Sentry.Integrations
+namespace Sentry.Integrations;
+
+internal class AppDomainUnhandledExceptionIntegration : ISdkIntegration
 {
-    internal class AppDomainUnhandledExceptionIntegration : IInternalSdkIntegration
+    private readonly IAppDomain _appDomain;
+    private IHub? _hub;
+    private SentryOptions? _options;
+
+    internal AppDomainUnhandledExceptionIntegration(IAppDomain? appDomain = null)
+        => _appDomain = appDomain ?? AppDomainAdapter.Instance;
+
+    public void Register(IHub hub, SentryOptions options)
     {
-        private readonly IAppDomain _appDomain;
-        private IHub? _hub;
+        _hub = hub;
+        _options = options;
+        _appDomain.UnhandledException += Handle;
+    }
 
-        internal AppDomainUnhandledExceptionIntegration(IAppDomain? appDomain = null)
-            => _appDomain = appDomain ?? AppDomainAdapter.Instance;
+    // Internal for testability
+#if !NET6_0_OR_GREATER
+    [HandleProcessCorruptedStateExceptions]
+#endif
+    [SecurityCritical]
+    internal void Handle(object sender, UnhandledExceptionEventArgs e)
+    {
+        _options?.LogDebug("AppDomain Unhandled Exception");
 
-        public void Register(IHub hub, SentryOptions _)
+        if (e.ExceptionObject is Exception ex)
         {
-            _hub = hub;
-            _appDomain.UnhandledException += Handle;
+            ex.SetSentryMechanism(
+                "AppDomain.UnhandledException",
+                "This exception was caught by the .NET Application Domain global error handler. " +
+                "The application likely crashed as a result of this exception.",
+                handled: false);
+
+            // Call the internal implementation, so that we still capture even if the hub has been disabled.
+            _hub?.CaptureExceptionInternal(ex);
         }
 
-        public void Unregister(IHub hub)
+        if (e.IsTerminating)
         {
-            _appDomain.UnhandledException -= Handle;
-            _hub = null;
-        }
-
-        // Internal for testability
-        [HandleProcessCorruptedStateExceptions, SecurityCritical]
-        internal void Handle(object sender, UnhandledExceptionEventArgs e)
-        {
-            if (e.ExceptionObject is Exception ex)
-            {
-                ex.Data[Mechanism.HandledKey] = false;
-                ex.Data[Mechanism.MechanismKey] = "AppDomain.UnhandledException";
-                _ = (_hub?.CaptureException(ex));
-            }
-
-            if (e.IsTerminating)
-            {
-                (_hub as IDisposable)?.Dispose();
-            }
+            _hub?.Flush(_options!.ShutdownTimeout);
         }
     }
 }

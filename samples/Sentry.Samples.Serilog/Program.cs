@@ -1,31 +1,49 @@
-using System;
+using Sentry.Serilog;
 using Serilog;
 using Serilog.Context;
 using Serilog.Events;
+using Serilog.Formatting.Display;
 
 internal static class Program
 {
     private static void Main()
     {
+        // Initialise Sentry SDK itself
+        using var _ = SentrySdk.Init(options =>
+        {
+#if !SENTRY_DSN_DEFINED_IN_ENV
+            // A DSN is required. You can set here in code, or you can set it in the SENTRY_DSN environment variable.
+            // See https://docs.sentry.io/product/sentry-basics/dsn-explainer/
+            options.Dsn = SamplesShared.Dsn;
+#endif
+
+            options.AttachStacktrace = true;
+            // send PII like the username of the user logged in to the device
+            options.SendDefaultPii = true;
+            // Apply properties from the Serilog LogContext (like MyTaskId below) to Sentry events
+            options.UseSerilog();
+        });
+
         Log.Logger = new LoggerConfiguration()
             .Enrich.FromLogContext()
             .MinimumLevel.Debug()
             .WriteTo.Console()
-            // Other overloads exist, for example, configure the SDK with only the DSN or no parameters at all.
-            .WriteTo.Sentry(o =>
+            // Configure Serilog to send logs to Sentry
+            .WriteTo.Sentry(options =>
             {
-                o.MinimumBreadcrumbLevel = LogEventLevel.Debug; // Debug and higher are stored as breadcrumbs (default os Information)
-                o.MinimumEventLevel = LogEventLevel.Error; // Error and higher is sent as event (default is Error)
-                // If DSN is not set, the SDK will look for an environment variable called SENTRY_DSN. If nothing is found, SDK is disabled.
-                o.Dsn = "https://80aed643f81249d4bed3e30687b310ab@o447951.ingest.sentry.io/5428537";
-                o.AttachStacktrace = true;
-                o.SendDefaultPii = true; // send PII like the username of the user logged in to the device
-                // Other configuration
+                // Debug and higher are stored as breadcrumbs (default os Information)
+                options.MinimumBreadcrumbLevel = LogEventLevel.Debug;
+                // Error and higher are sent as events (default is Error)
+                options.MinimumEventLevel = LogEventLevel.Error;
+                // Optional Serilog text formatter used to format LogEvent to string. If TextFormatter is set, FormatProvider is ignored.
+                options.TextFormatter = new MessageTemplateTextFormatter("[{MyTaskId}] {Message}");
             })
             .CreateLogger();
 
         try
         {
+            // The following property is used in the TextFormatter to format the log message.
+            using (LogContext.PushProperty("MyTaskId", 42))
             // The following anonymous object gets serialized and sent with log messages
             using (LogContext.PushProperty("inventory", new
             {
@@ -41,6 +59,9 @@ internal static class Program
                 // Minimum Breadcrumb level is set to Debug so the following message is stored in memory
                 // and sent with following events of the same Scope
                 Log.Debug("Debug message stored as breadcrumb.");
+
+                // Breadcrumb with a different context property value will be formatted with a different prefix.
+                Log.ForContext("MyTaskId", 65).Debug("Message with a different MyTaskId");
 
                 // Sends an event and stores the message as a breadcrumb too, to be sent with any upcoming events.
                 Log.Error("Some event that includes the previous breadcrumbs");

@@ -1,78 +1,51 @@
-﻿namespace Sentry
+namespace Sentry;
+
+/// <summary>
+/// Transaction metadata used for sampling.
+/// </summary>
+public class TransactionContext : SpanContext, ITransactionContext
 {
+    /// <inheritdoc />
+    public string Name { get; set; }
+
+    /// <inheritdoc />
+    public TransactionNameSource NameSource { get; set; }
+
     /// <summary>
-    /// Transaction metadata used for sampling.
+    /// Whether the parent transaction of this transaction has been sampled.
     /// </summary>
-    public class TransactionContext : SpanContext, ITransactionContext
+    public bool? IsParentSampled { get; }
+
+    /// <summary>
+    /// Initializes an instance of <see cref="TransactionContext"/>.
+    /// </summary>
+    public TransactionContext(
+        string name,
+        string operation,
+        SpanId? spanId = null,
+        SpanId? parentSpanId = null,
+        SentryId? traceId = null,
+        string? description = "",
+        SpanStatus? status = null,
+        bool? isSampled = null,
+        bool? isParentSampled = null,
+        TransactionNameSource nameSource = TransactionNameSource.Custom
+    )
+        : base(operation, spanId, parentSpanId, traceId, description, status, isSampled)
     {
-        /// <inheritdoc />
-        public string Name { get; }
+        Name = name;
+        IsParentSampled = isParentSampled;
+        NameSource = nameSource;
+    }
 
-        /// <summary>
-        /// Whether the parent transaction of this transaction has been sampled.
-        /// </summary>
-        public bool? IsParentSampled { get; }
-
-        /// <summary>
-        /// Initializes an instance of <see cref="TransactionContext"/>.
-        /// </summary>
-        public TransactionContext(
-            SpanId spanId,
-            SpanId? parentSpanId,
-            SentryId traceId,
-            string name,
-            string operation,
-            string? description,
-            SpanStatus? status,
-            bool? isSampled,
-            bool? isParentSampled)
-            : base(spanId, parentSpanId, traceId, operation, description, status, isSampled)
-        {
-            Name = name;
-            IsParentSampled = isParentSampled;
-        }
-
-        /// <summary>
-        /// Initializes an instance of <see cref="TransactionContext"/>.
-        /// </summary>
-        public TransactionContext(
-            SpanId? parentSpanId,
-            SentryId traceId,
-            string name,
-            string operation,
-            bool? isParentSampled)
-            : this(SpanId.Create(), parentSpanId, traceId, name, operation, "", null, isParentSampled, isParentSampled)
-        {
-        }
-
-        /// <summary>
-        /// Initializes an instance of <see cref="TransactionContext"/>.
-        /// </summary>
-        public TransactionContext(
-            string name,
-            string operation,
-            bool? isSampled)
-            : this(SpanId.Create(), null, SentryId.Create(), name, operation, "", null, isSampled, null)
-        {
-        }
-
-        /// <summary>
-        /// Initializes an instance of <see cref="TransactionContext"/>.
-        /// </summary>
-        public TransactionContext(
-            string name,
-            string operation,
-            SentryTraceHeader traceHeader)
-            : this(traceHeader.SpanId, traceHeader.TraceId, name, operation, traceHeader.IsSampled)
-        {
-        }
-
-        /// <summary>
-        /// Initializes an instance of <see cref="TransactionContext"/>.
-        /// </summary>
-        public TransactionContext(string name, string operation)
-            : this(name, operation, (bool?) null)
-        {
-        }
+    /// <summary>
+    /// Initializes an instance of <see cref="TransactionContext"/>.
+    /// </summary>
+    internal TransactionContext(
+        string name,
+        string operation,
+        SentryTraceHeader traceHeader)
+        : this(name, operation, SpanId.Create(), parentSpanId: traceHeader.SpanId, traceId: traceHeader.TraceId, "", null, isSampled: traceHeader.IsSampled, isParentSampled: traceHeader.IsSampled)
+    {
     }
 }

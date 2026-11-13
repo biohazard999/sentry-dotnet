@@ -1,102 +1,275 @@
-using System;
-using NSubstitute;
-using Xunit;
+namespace Sentry.Tests;
 
-namespace Sentry.Tests
+public class SentryClientExtensionsTests
 {
-    public class SentryClientExtensionsTests
+    private readonly ISentryClient _sut = Substitute.For<ISentryClient>();
+
+    [Fact]
+    public void CaptureException_DisabledClient_DoesNotCaptureEvent()
     {
-        private readonly ISentryClient _sut = Substitute.For<ISentryClient>();
+        _ = _sut.IsEnabled.Returns(false);
+        var id = _sut.CaptureException(new Exception());
 
-        [Fact]
-        public void CaptureException_DisabledClient_DoesNotCaptureEvent()
+        _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
+        Assert.Equal(default, id);
+    }
+
+    [Fact]
+    public void CaptureException_EnabledClient_CapturesEvent()
+    {
+        _ = _sut.IsEnabled.Returns(true);
+        _ = _sut.CaptureException(new Exception());
+        _ = _sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>());
+    }
+
+    [Fact]
+    public void CaptureException_NoHandledArgument_DoesNotSetHandledFlag()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+
+        // Act
+        _ = _sut.CaptureException(ex);
+
+        // Assert
+        Assert.False(ex.Data.Contains(Mechanism.HandledKey));
+    }
+
+    [Fact]
+    public void CaptureException_NoHandledArgument_PresetFlagIsPreserved()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+        ex.SetSentryMechanism("SomeMechanism", handled: false);
+
+        // Act
+        _ = _sut.CaptureException(ex);
+
+        // Assert
+        Assert.Equal(false, ex.Data[Mechanism.HandledKey]);
+    }
+
+    [Fact]
+    public void CaptureException_DisabledClient_NoHandledArgument_DoesNotMutateException()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(false);
+        var ex = new Exception();
+
+        // Act
+        var id = _sut.CaptureException(ex);
+
+        // Assert
+        _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
+        Assert.Equal(default, id);
+        Assert.False(ex.Data.Contains(Mechanism.HandledKey));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CaptureException_ExplicitHandled_RecordsFlagOnException(bool handled)
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+
+        // Act
+        _ = _sut.CaptureException(ex, handled);
+
+        // Assert
+        Assert.Equal(handled, ex.Data[Mechanism.HandledKey]);
+    }
+
+    [Fact]
+    public void CaptureException_ExplicitHandled_OverridesFlagSetBySetSentryMechanism()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+        ex.SetSentryMechanism("SomeMechanism", handled: false);
+
+        // Act
+        _ = _sut.CaptureException(ex, handled: true);
+
+        // Assert
+        Assert.Equal(true, ex.Data[Mechanism.HandledKey]);
+    }
+
+    [Fact]
+    public void CaptureException_DisabledClient_ExplicitHandled_DoesNotMutateException()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(false);
+        var ex = new Exception();
+
+        // Act
+        var id = _sut.CaptureException(ex, handled: false);
+
+        // Assert
+        _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
+        Assert.Equal(default, id);
+        Assert.False(ex.Data.Contains(Mechanism.HandledKey));
+    }
+
+    [Fact]
+    public void CaptureMessage_DisabledClient_DoesNotCaptureEvent()
+    {
+        _ = _sut.IsEnabled.Returns(false);
+        var id = _sut.CaptureMessage("Message");
+
+        _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
+        Assert.Equal(default, id);
+    }
+
+    [Fact]
+    public void CaptureMessage_EnabledClient_CapturesEvent()
+    {
+        _ = _sut.IsEnabled.Returns(true);
+        _ = _sut.CaptureMessage("Message");
+        _ = _sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>());
+    }
+
+    [Fact]
+    public void CaptureMessage_Level_CapturesEventWithLevel()
+    {
+        const SentryLevel expectedLevel = SentryLevel.Fatal;
+        _ = _sut.IsEnabled.Returns(true);
+        _ = _sut.CaptureMessage("Message", expectedLevel);
+        _ = _sut.Received(1).CaptureEvent(Arg.Is<SentryEvent>(e => e.Level == expectedLevel));
+    }
+
+    [Fact]
+    public void CaptureMessage_Message_CapturesEventWithMessage()
+    {
+        const string expectedMessage = "message";
+        _ = _sut.IsEnabled.Returns(true);
+        _ = _sut.CaptureMessage(expectedMessage);
+        _ = _sut.Received(1).CaptureEvent(Arg.Is<SentryEvent>(e => e.Message.Message == expectedMessage));
+    }
+
+    [Fact]
+    public void CaptureMessage_WhitespaceMessage_DoesNotCapturesEventWithMessage()
+    {
+        _ = _sut.IsEnabled.Returns(true);
+        var id = _sut.CaptureMessage("   ");
+
+        _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
+        Assert.Equal(default, id);
+    }
+
+    [Fact]
+    public void CaptureMessage_NullMessage_DoesNotCapturesEventWithMessage()
+    {
+        _ = _sut.IsEnabled.Returns(true);
+        var id = _sut.CaptureMessage(null!);
+
+        _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
+        Assert.Equal(default, id);
+    }
+
+    [Fact]
+    public async Task FlushAsync_NoTimeoutSpecified_UsesFlushTimeoutFromOptions()
+    {
+        var timeout = TimeSpan.FromSeconds(12345);
+        SentryClientExtensions.SentryOptionsForTestingOnly = new SentryOptions
         {
-            _ = _sut.IsEnabled.Returns(false);
-            var id = _sut.CaptureException(new Exception());
+            FlushTimeout = timeout
+        };
 
-            _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
-            Assert.Equal(default, id);
-        }
+        await _sut.FlushAsync();
 
-        [Fact]
-        public void CaptureException_EnabledClient_CapturesEvent()
+        await _sut.Received(1).FlushAsync(timeout);
+    }
+
+    [Fact]
+    public async Task Flush_NoTimeoutSpecified_UsesFlushTimeoutFromOptions()
+    {
+        var timeout = TimeSpan.FromSeconds(12345);
+        SentryClientExtensions.SentryOptionsForTestingOnly = new SentryOptions
         {
-            _ = _sut.IsEnabled.Returns(true);
-            _ = _sut.CaptureException(new Exception());
-            _ = _sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>());
-        }
+            FlushTimeout = timeout
+        };
 
-        [Fact]
-        public void CaptureMessage_DisabledClient_DoesNotCaptureEvent()
-        {
-            _ = _sut.IsEnabled.Returns(false);
-            var id = _sut.CaptureMessage("Message");
+        // ReSharper disable once MethodHasAsyncOverload
+        _sut.Flush();
 
-            _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
-            Assert.Equal(default, id);
-        }
+        await _sut.Received(1).FlushAsync(timeout);
+    }
 
-        [Fact]
-        public void CaptureMessage_EnabledClient_CapturesEvent()
-        {
-            _ = _sut.IsEnabled.Returns(true);
-            _ = _sut.CaptureMessage("Message");
-            _ = _sut.Received(1).CaptureEvent(Arg.Any<SentryEvent>());
-        }
+    [Fact]
+    public async Task Flush_WithTimeoutSpecified_UsesThatTimeout()
+    {
+        var timeout = TimeSpan.FromSeconds(12345);
 
-        [Fact]
-        public void CaptureMessage_Level_CapturesEventWithLevel()
-        {
-            const SentryLevel expectedLevel = SentryLevel.Fatal;
-            _ = _sut.IsEnabled.Returns(true);
-            _ = _sut.CaptureMessage("Message", expectedLevel);
-            _ = _sut.Received(1).CaptureEvent(Arg.Is<SentryEvent>(e => e.Level == expectedLevel));
-        }
+        // ReSharper disable once MethodHasAsyncOverload
+        _sut.Flush(timeout);
 
-        [Fact]
-        public void CaptureMessage_Message_CapturesEventWithMessage()
-        {
-            const string expectedMessage = "message";
-            _ = _sut.IsEnabled.Returns(true);
-            _ = _sut.CaptureMessage(expectedMessage);
-            _ = _sut.Received(1).CaptureEvent(Arg.Is<SentryEvent>(e => e.Message.Message == expectedMessage));
-        }
+        await _sut.Received(1).FlushAsync(timeout);
+    }
 
-        [Fact]
-        public void CaptureMessage_WhitespaceMessage_DoesNotCapturesEventWithMessage()
-        {
-            _ = _sut.IsEnabled.Returns(true);
-            var id = _sut.CaptureMessage("   ");
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CaptureException_ExplicitTerminal_RecordsTerminalFlagOnException(bool terminal)
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(true);
+        var ex = new Exception();
 
-            _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
-            Assert.Equal(default, id);
-        }
+        // Act
+        _ = _sut.CaptureException(ex, handled: false, terminal: terminal);
 
-        [Fact]
-        public void CaptureMessage_NullMessage_DoesNotCapturesEventWithMessage()
-        {
-            _ = _sut.IsEnabled.Returns(true);
-            var id = _sut.CaptureMessage(null);
+        // Assert
+        Assert.Equal(false, ex.Data[Mechanism.HandledKey]);
+        Assert.Equal(terminal, ex.Data[Mechanism.TerminalKey]);
+    }
 
-            _ = _sut.DidNotReceive().CaptureEvent(Arg.Any<SentryEvent>());
-            Assert.Equal(default, id);
-        }
+    [Fact]
+    public void CaptureException_NoTerminalArgument_DefaultsToNonTerminal()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(true);
+        var ex = new Exception();
 
-        [Fact]
-        public void CaptureUserFeedback_EnabledClient_CapturesUserFeedback()
-        {
-            _ = _sut.IsEnabled.Returns(true);
-            _sut.CaptureUserFeedback(Guid.Parse("1ec19311a7c048818de80b18dcc43eaa"), "email@email.com", "comments");
-            _sut.Received(1).CaptureUserFeedback(Arg.Any<UserFeedback>());
-        }
+        // Act
+        _ = _sut.CaptureException(ex, handled: false);
 
-        [Fact]
-        public void CaptureUserFeedback_DisabledClient_DoesNotCaptureUserFeedback()
-        {
-            _ = _sut.IsEnabled.Returns(false);
-            _sut.CaptureUserFeedback(Guid.Parse("1ec19311a7c048818de80b18dcc43eea"), "email@email.com", "comments");
+        // Assert
+        Assert.Equal(false, ex.Data[Mechanism.TerminalKey]);
+    }
 
-            _sut.DidNotReceive().CaptureUserFeedback(Arg.Any<UserFeedback>());
-        }
+    [Fact]
+    public void CaptureException_HandledTrue_ClearsPresetTerminalFlag()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(true);
+        var ex = new Exception();
+        ex.SetSentryMechanism("SomeMechanism", handled: false, terminal: true);
+
+        // Act
+        _ = _sut.CaptureException(ex, handled: true);
+
+        // Assert
+        Assert.Equal(true, ex.Data[Mechanism.HandledKey]);
+        Assert.False(ex.Data.Contains(Mechanism.TerminalKey));
+    }
+
+    [Fact]
+    public void CaptureException_ExplicitTerminal_DisabledClient_DoesNotRecordFlagsOnException()
+    {
+        // Arrange
+        _ = _sut.IsEnabled.Returns(false);
+        var ex = new Exception();
+
+        // Act
+        var id = _sut.CaptureException(ex, handled: false, terminal: true);
+
+        // Assert
+        Assert.Equal(default, id);
+        Assert.False(ex.Data.Contains(Mechanism.HandledKey));
+        Assert.False(ex.Data.Contains(Mechanism.TerminalKey));
     }
 }

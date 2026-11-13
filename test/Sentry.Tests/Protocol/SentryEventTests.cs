@@ -1,153 +1,271 @@
-using System;
-using System.Collections.Generic;
-using FluentAssertions;
-using Sentry.Internal;
-using Sentry.Protocol;
-using Xunit;
+namespace Sentry.Tests.Protocol;
 
-namespace Sentry.Tests.Protocol
+public partial class SentryEventTests
 {
-    public class SentryEventTests
+    private readonly IDiagnosticLogger _testOutputLogger;
+
+    public SentryEventTests(ITestOutputHelper output)
     {
-        [Fact]
-        public void SerializeObject_AllPropertiesSetToNonDefault_SerializesValidObject()
+        _testOutputLogger = new TestOutputDiagnosticLogger(output);
+    }
+
+    [Fact]
+    public void Ctor_Platform_CSharp()
+    {
+        var evt = new SentryEvent();
+        Assert.Equal(SentryConstants.Platform, evt.Platform);
+    }
+
+    [Fact]
+    public void Ctor_Timestamp_NonDefault()
+    {
+        var evt = new SentryEvent();
+        Assert.NotEqual(default, evt.Timestamp);
+    }
+
+    [Fact]
+    public void Ctor_EventId_NonDefault()
+    {
+        var evt = new SentryEvent();
+        Assert.NotEqual(default, evt.EventId);
+    }
+
+    [Fact]
+    public void Ctor_Exception_Stored()
+    {
+        var e = new Exception();
+        var evt = new SentryEvent(e);
+        Assert.Same(e, evt.Exception);
+    }
+
+    [Fact]
+    public void SentryThreads_Getter_NotNull()
+    {
+        var evt = new SentryEvent();
+        Assert.NotNull(evt.SentryThreads);
+    }
+
+    [Fact]
+    public void SentryThreads_SetToNUll_Getter_NotNull()
+    {
+        var evt = new SentryEvent
         {
-            var ex = new Exception("exception message");
-            var timestamp = DateTimeOffset.MaxValue;
-            var id = Guid.Parse("4b780f4c-ec03-42a7-8ef8-a41c9d5621f8");
-            var sut = new SentryEvent(ex, timestamp, id)
+            SentryThreads = null
+        };
+
+        Assert.NotNull(evt.SentryThreads);
+    }
+
+    [Fact]
+    public void SentryExceptions_Getter_NotNull()
+    {
+        var evt = new SentryEvent();
+        Assert.NotNull(evt.SentryExceptions);
+    }
+
+    [Fact]
+    public void SentryExceptions_SetToNUll_Getter_NotNull()
+    {
+        var evt = new SentryEvent
+        {
+            SentryExceptions = null
+        };
+
+        Assert.NotNull(evt.SentryExceptions);
+    }
+
+    [Fact]
+    public void Modules_Getter_NotNull()
+    {
+        var evt = new SentryEvent();
+        Assert.NotNull(evt.Modules);
+    }
+
+    [Fact]
+    public void Redact_Redacts_Urls()
+    {
+        // Arrange
+        var message = "message123 https://user@not.redacted";
+        var logger = "logger123 https://user@not.redacted";
+        var platform = "platform123 https://user@not.redacted";
+        var serverName = "serverName123 https://user@not.redacted";
+        var release = "release123 https://user@not.redacted";
+        var distribution = "distribution123 https://user@not.redacted";
+        var moduleValue = "module123 https://user@not.redacted";
+        var transactionName = "transactionName123 https://user@sentry.io";
+        var requestUrl = "https://user@not.redacted";
+        var username = "username";
+        var email = "bob@foo.com";
+        var ipAddress = "127.0.0.1";
+        var environment = "environment123 https://user@not.redacted";
+
+        var breadcrumbMessage = "message https://user@sentry.io"; // should be redacted
+        var breadcrumbDataValue = "data-value https://user@sentry.io"; // should be redacted
+        var tagValue = "tag_value https://user@not.redacted";
+
+        var timestamp = DateTimeOffset.MaxValue;
+
+        var evt = new SentryEvent()
+        {
+            Message = message,
+            Logger = logger,
+            Platform = platform,
+            ServerName = serverName,
+            Release = release,
+            Distribution = distribution,
+            TransactionName = transactionName,
+            Request = new SentryRequest
             {
-                User = new User { Id = "user-id" },
-                Request = new Request { Method = "POST" },
-                Contexts = new Contexts {
-                    ["context_key"] = "context_value",
-                    [".NET Framework"] = new Dictionary<string, string>
-                    {
-                        [".NET Framework"] = "\"v2.0.50727\", \"v3.0\", \"v3.5\"",
-                        [".NET Framework Client"] = "\"v4.8\", \"v4.0.0.0\"",
-                        [".NET Framework Full"] = "\"v4.8\""
-                    }
-                },
-                Sdk = new SdkVersion { Name = "SDK-test", Version = "1.1.1" },
-                Environment = "environment",
-                Level = SentryLevel.Fatal,
-                Logger = "logger",
-                Message = new SentryMessage
-                {
-                    Message = "message",
-                    Formatted = "structured_message"
-                },
-                Modules = { { "module_key", "module_value" } },
-                Release = "release",
-                SentryExceptions = new[] { new SentryException { Value = "exception_value"} },
-                SentryThreads = new[] { new SentryThread { Crashed = true } },
-                ServerName = "server_name",
-                TransactionName = "transaction",
-            };
-
-            sut.Sdk.AddPackage(new Package("name", "version"));
-            sut.AddBreadcrumb(new Breadcrumb(timestamp, "crumb"));
-            sut.AddBreadcrumb(new Breadcrumb(
-                timestamp,
-                "message",
-                "type",
-                new Dictionary<string, string> {{"data-key","data-value"}},
-                "category",
-                BreadcrumbLevel.Warning));
-
-            sut.SetExtra("extra_key", "extra_value");
-            sut.Fingerprint = new[] {"fingerprint"};
-            sut.SetTag("tag_key", "tag_value");
-
-            var actualString = sut.ToJsonString();
-
-            var actual = SentryEvent.FromJson(Json.Parse(actualString));
-
-            // Assert
-            actual.Should().BeEquivalentTo(sut, o =>
+                Method = "GET",
+                Url = requestUrl
+            },
+            User = new SentryUser
             {
-                // Exceptions are not deserialized
-                o.Excluding(x => x.Exception);
+                Username = username,
+                Email = email,
+                IpAddress = ipAddress
+            },
+            Environment = environment,
+        };
+        evt.Modules.Add("module", moduleValue);
+        evt.AddBreadcrumb(new Breadcrumb(timestamp, breadcrumbMessage));
+        evt.AddBreadcrumb(new Breadcrumb(
+            timestamp,
+            "message",
+            "type",
+            new Dictionary<string, string> { { "data-key", breadcrumbDataValue } },
+            "category",
+            BreadcrumbLevel.Warning));
+        evt.SetTag("tag_key", tagValue);
 
-                // Timestamps lose some precision when writing to JSON
-                o.Using<DateTimeOffset>(ctx =>
-                    ctx.Subject.Should().BeCloseTo(ctx.Expectation, TimeSpan.FromMilliseconds(1))
-                ).WhenTypeIs<DateTimeOffset>();
+        // Act
+        evt.Redact();
 
-                return o;
-            });
-        }
-
-        [Fact]
-        public void Ctor_Platform_CSharp()
+        // Assert
+        using (new AssertionScope())
         {
-            var evt = new SentryEvent();
-            Assert.Equal(Constants.Platform, evt.Platform);
+            evt.Message.Message.Should().Be(message);
+            evt.Logger.Should().Be(logger);
+            evt.Platform.Should().Be(platform);
+            evt.ServerName.Should().Be(serverName);
+            evt.Release.Should().Be(release);
+            evt.Distribution.Should().Be(distribution);
+            evt.Modules["module"].Should().Be(moduleValue);
+            evt.TransactionName.Should().Be(transactionName);
+            // We don't redact the User or the Request since, if SendDefaultPii is false, we don't add these to the
+            // transaction in the SDK anyway (by default they don't get sent... but the user can always override this
+            // behavior if they need)
+            evt.Request.Url.Should().Be(requestUrl);
+            evt.User.Username.Should().Be(username);
+            evt.User.Email.Should().Be(email);
+            evt.User.IpAddress.Should().Be(ipAddress);
+            evt.Environment.Should().Be(environment);
+            var breadcrumbs = evt.Breadcrumbs.ToArray();
+            breadcrumbs.Length.Should().Be(2);
+            breadcrumbs[0].Message.Should().Be($"message https://{PiiExtensions.RedactedText}@sentry.io");
+            breadcrumbs[1].Data?["data-key"].Should().Be($"data-value https://{PiiExtensions.RedactedText}@sentry.io");
+            evt.Tags["tag_key"].Should().Be(tagValue);
         }
+    }
 
-        [Fact]
-        public void Ctor_Timestamp_NonDefault()
-        {
-            var evt = new SentryEvent();
-            Assert.NotEqual(default, evt.Timestamp);
-        }
-
-        [Fact]
-        public void Ctor_EventId_NonDefault()
-        {
-            var evt = new SentryEvent();
-            Assert.NotEqual(default, evt.EventId);
-        }
-
-        [Fact]
-        public void Ctor_Exception_Stored()
-        {
-            var e = new Exception();
-            var evt = new SentryEvent(e);
-            Assert.Same(e, evt.Exception);
-        }
-
-        [Fact]
-        public void SentryThreads_Getter_NotNull()
-        {
-            var evt = new SentryEvent();
-            Assert.NotNull(evt.SentryThreads);
-        }
-
-        [Fact]
-        public void SentryThreads_SetToNUll_Getter_NotNull()
-        {
-            var evt = new SentryEvent
+    [Fact]
+    public void FromJson_NumericTimestamps_ParsesUnixSeconds()
+    {
+        var json = """
             {
-                SentryThreads = null
-            };
+              "timestamp": 1759435453.5,
+              "breadcrumbs": [{ "timestamp": 1759435453.123, "message": "test" }]
+            }
+            """;
 
-            Assert.NotNull(evt.SentryThreads);
-        }
+        var actual = Json.Parse(json, SentryEvent.FromJson);
 
-        [Fact]
-        public void SentryExceptions_Getter_NotNull()
+        actual.Timestamp.Should().Be(DateTimeOffset.FromUnixTimeMilliseconds(1759435453500));
+        actual.Breadcrumbs.Single().Timestamp.Should().Be(DateTimeOffset.FromUnixTimeMilliseconds(1759435453123));
+    }
+
+    [Fact]
+    public void GetExceptionType_NoException_ReturnsNone()
+    {
+        var evt = new SentryEvent();
+
+        Assert.Equal(SentryEvent.ExceptionType.None, evt.GetExceptionType());
+    }
+
+    [Fact]
+    public void GetExceptionType_HandledException_ReturnsHandled()
+    {
+        var exception = new Exception("test");
+        exception.SetSentryMechanism("test", handled: true);
+        var evt = new SentryEvent(exception);
+
+        Assert.Equal(SentryEvent.ExceptionType.Handled, evt.GetExceptionType());
+    }
+
+    [Fact]
+    public void GetExceptionType_HandledExceptionViaSentryExceptions_ReturnsHandled()
+    {
+        var evt = new SentryEvent
         {
-            var evt = new SentryEvent();
-            Assert.NotNull(evt.SentryExceptions);
-        }
+            SentryExceptions = [new SentryException { Mechanism = new Mechanism { Handled = true } }]
+        };
 
-        [Fact]
-        public void SentryExceptions_SetToNUll_Getter_NotNull()
+        Assert.Equal(SentryEvent.ExceptionType.Handled, evt.GetExceptionType());
+    }
+
+    [Fact]
+    public void GetExceptionType_UnhandledTerminalException_ReturnsUnhandled()
+    {
+        var exception = new Exception("test");
+        exception.SetSentryMechanism("AppDomain.UnhandledException", handled: false, terminal: true);
+        var evt = new SentryEvent(exception);
+
+        Assert.Equal(SentryEvent.ExceptionType.UnhandledTerminal, evt.GetExceptionType());
+    }
+
+    [Fact]
+    public void GetExceptionType_UnhandledTerminalExceptionViaSentryExceptions_ReturnsUnhandled()
+    {
+        var evt = new SentryEvent
         {
-            var evt = new SentryEvent
-            {
-                SentryExceptions = null
-            };
+            SentryExceptions = [new SentryException { Mechanism = new Mechanism { Handled = false } }]
+        };
 
-            Assert.NotNull(evt.SentryExceptions);
-        }
+        Assert.Equal(SentryEvent.ExceptionType.UnhandledTerminal, evt.GetExceptionType());
+    }
 
-        [Fact]
-        public void Modules_Getter_NotNull()
+    [Fact]
+    public void GetExceptionType_UnhandledNonTerminalException_ReturnsUnhandledNonTerminal()
+    {
+        var exception = new Exception("test");
+        exception.SetSentryMechanism("UnobservedTaskException", handled: false, terminal: false);
+        var evt = new SentryEvent(exception);
+
+        Assert.Equal(SentryEvent.ExceptionType.UnhandledNonTerminal, evt.GetExceptionType());
+    }
+
+    [Fact]
+    public void GetExceptionType_UnhandledNonTerminalExceptionViaSentryExceptions_ReturnsUnhandledNonTerminal()
+    {
+        var mechanism = new Mechanism { Handled = false, Terminal = false };
+
+        var evt = new SentryEvent
         {
-            var evt = new SentryEvent();
-            Assert.NotNull(evt.Modules);
-        }
+            SentryExceptions = [new SentryException { Mechanism = mechanism }]
+        };
+
+        Assert.Equal(SentryEvent.ExceptionType.UnhandledNonTerminal, evt.GetExceptionType());
+    }
+
+    [Theory]
+    [InlineData("""[{"message": "first"}, {"message": "second"}]""")]
+    [InlineData("""{"values": [{"message": "first"}, {"message": "second"}]}""")]
+    public void FromJson_Breadcrumbs_AcceptsArrayOrValuesObject(string breadcrumbs)
+    {
+        var json = $$"""{"breadcrumbs": {{breadcrumbs}}}""";
+
+        var evt = Json.Parse(json, SentryEvent.FromJson);
+
+        evt.Breadcrumbs.Select(b => b.Message).Should().Equal("first", "second");
     }
 }

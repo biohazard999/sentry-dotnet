@@ -1,30 +1,29 @@
 using Microsoft.AspNetCore.Builder;
-#if NETCOREAPP2_1 || NET461
-using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IHostingEnvironment;
-#else
-using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IWebHostEnvironment;
-#endif
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace Sentry.AspNetCore.Tests
+#if NETCOREAPP3_1_OR_GREATER
+using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IWebHostEnvironment;
+#else
+using IHostingEnvironment = Microsoft.AspNetCore.Hosting.IHostingEnvironment;
+#endif
+
+namespace Sentry.AspNetCore.Tests;
+
+public class Startup
 {
-    public class Startup
+    public Startup(IConfiguration configuration)
     {
-        public Startup(IConfiguration configuration)
-        {
-            Configuration = configuration;
-        }
+        Configuration = configuration;
+    }
 
-        public IConfiguration Configuration { get; }
+    public IConfiguration Configuration { get; }
 
-        public void ConfigureServices(IServiceCollection services)
-        {
-        }
+    public void ConfigureServices(IServiceCollection services)
+    {
+    }
 
-        public void Configure(IApplicationBuilder app, IHostingEnvironment env)
-        {
-
-        }
+    public void Configure(IApplicationBuilder app, IHostingEnvironment env)
+    {
     }
 }

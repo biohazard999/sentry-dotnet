@@ -1,13 +1,22 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Configuration;
 using Microsoft.Extensions.Options;
 
-namespace Sentry.Extensions.Logging
+namespace Sentry.Extensions.Logging;
+
+internal sealed class SentryLoggingOptionsSetup : IConfigureOptions<SentryLoggingOptions>
 {
-    internal class SentryLoggingOptionsSetup : ConfigureFromConfigurationOptions<SentryLoggingOptions>
+    private readonly IConfiguration _config;
+
+    public SentryLoggingOptionsSetup(ILoggerProviderConfiguration<SentryStructuredLoggerProvider> config)
     {
-        public SentryLoggingOptionsSetup(
-            ILoggerProviderConfiguration<SentryLoggerProvider> providerConfiguration)
-            : base(providerConfiguration.Configuration)
-        { }
+        ArgumentNullException.ThrowIfNull(config);
+        _config = config.Configuration;
+    }
+
+    public void Configure(SentryLoggingOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        SentryLoggingConfiguration.ApplyTo(_config, options);
     }
 }

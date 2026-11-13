@@ -1,50 +1,53 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net5.0;netcoreapp3.1;netcoreapp3.0;netcoreapp2.1;net461</TargetFrameworks>
+    <TargetFrameworks>$(CurrentTfms)</TargetFrameworks>
+    <TargetFrameworks Condition="'$(NO_ANDROID)' == ''">$(TargetFrameworks);$(LatestAndroidTfm);$(PreviousAndroidTfm)</TargetFrameworks>
+    <TargetFrameworks Condition="'$(NO_IOS)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">$(TargetFrameworks);$(LatestIosTfm);$(PreviousIosTfm)</TargetFrameworks>
+    <TargetFrameworks Condition="'$(NO_MACCATALYST)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">$(TargetFrameworks);$(LatestMacCatalystTfm);$(PreviousMacCatalystTfm)</TargetFrameworks>
+    <!-- These tests fail on Mono -->
+    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(TargetFrameworks);net48</TargetFrameworks>
   </PropertyGroup>
 
-  <PropertyGroup Condition="$(TargetFramework.StartsWith('net4'))">
-    <DefineConstants>NETFX;$(AdditionalConstants)</DefineConstants>
-  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sentry\Sentry.csproj" />
+    <ProjectReference Include="..\Sentry.Testing\Sentry.Testing.csproj" />
+  </ItemGroup>
 
-  <!-- From Ben.Demystifier -->
-  <PropertyGroup Condition="'$(TargetFramework)' != 'netcoreapp2.1' and !$(TargetFramework.StartsWith('net4'))">
-    <DefineConstants>$(DefineConstants);HAS_ASYNC_ENUMERATOR</DefineConstants>
-  </PropertyGroup>
-  <!-- Ben.Demystifier doesn't test Mono -->
-  <ItemGroup Condition="!$(TargetFramework.StartsWith('net4')) and '$(OS)' != 'Windows_NT'">
-    <Compile Include="../../modules/Ben.Demystifier/test/Ben.Demystifier.Test/**/*.cs">
-      <Link>Ben.Demystifier/%(RecursiveDir)/%(Filename)%(Extension)</Link>
+  <ItemGroup Condition="'$(TargetPlatformIdentifier)' == ''">
+    <ProjectReference Include="..\Sentry.Testing.CrashableApp\Sentry.Testing.CrashableApp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="HintTests.CaptureEvent_ActiveTransaction_UnhandledExceptionTransactionEndedAsCrashed.Core3_1.verified.txt">
+      <ParentFile>$([System.String]::Copy('%(FileName)').Split('.')[0])</ParentFile>
+      <DependentUpon>HintTests.cs</DependentUpon>
+    </None>
+    <None Update="HintTests.CaptureEvent_ActiveTransaction_UnhandledExceptionTransactionEndedAsCrashed.DotNet6_0.verified.txt">
+      <ParentFile>$([System.String]::Copy('%(FileName)').Split('.')[0])</ParentFile>
+      <DependentUpon>HintTests.cs</DependentUpon>
+    </None>
+    <None Update="HintTests.CaptureEvent_ActiveTransaction_UnhandledExceptionTransactionEndedAsCrashed.DotNet7_0.verified.txt">
+      <ParentFile>$([System.String]::Copy('%(FileName)').Split('.')[0])</ParentFile>
+      <DependentUpon>HintTests.cs</DependentUpon>
+    </None>
+    <None Update="HintTests.CaptureEvent_ActiveTransaction_UnhandledExceptionTransactionEndedAsCrashed.Mono4_0.verified.txt">
+      <ParentFile>$([System.String]::Copy('%(FileName)').Split('.')[0])</ParentFile>
+      <DependentUpon>HintTests.cs</DependentUpon>
+    </None>
+    <None Update="HintTests.CaptureEvent_ActiveTransaction_UnhandledExceptionTransactionEndedAsCrashed.Net4_8.verified.txt">
+      <ParentFile>$([System.String]::Copy('%(FileName)').Split('.')[0])</ParentFile>
+      <DependentUpon>HintTests.cs</DependentUpon>
+    </None>
+    <Compile Update="SentryMetricEmitterTests.Options.cs;SentryMetricEmitterTests.Types.cs;SentryMetricEmitterTests.Values.cs">
+      <DependentUpon>SentryMetricEmitterTests.cs</DependentUpon>
+    </Compile>
+    <Compile Update="SentryStructuredLoggerTests.Format.cs">
+      <DependentUpon>SentryStructuredLoggerTests.cs</DependentUpon>
     </Compile>
   </ItemGroup>
-  <!-- From Ben.Demystifier -->
 
-  <ItemGroup>
-    <PackageReference Include="Verify.Xunit" Version="8.11.0" />
+  <ItemGroup Condition="'$(TargetFrameworkIdentifier)' != '.NETFramework'">
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="8.0.1" />
   </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="../../src/Sentry/Sentry.csproj" />
-    <ProjectReference Include="../Sentry.Testing/Sentry.Testing.csproj" />
-  </ItemGroup>
-
-  <!-- Run netcoreapp3.1 against netcoreapp3.0 target of Sentry -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'netcoreapp3.1'">
-    <ProjectReference Update="../../src/Sentry/Sentry.csproj" SetTargetFramework="TargetFramework=netcoreapp3.0" />
-  </ItemGroup>
-
-  <!-- Run netcoreapp3.0 against netstandard2.1 target of Sentry -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'netcoreapp3.0'">
-    <ProjectReference Update="../../src/Sentry/Sentry.csproj" SetTargetFramework="TargetFramework=netstandard2.1" />
-    <!-- NET Core's built-in STJ is lower version which causes conflicts, so we have to explicitly reference it -->
-    <PackageReference Include="System.Text.Json" Version="5.0.0" />
-    <!-- Ben.Demystifier uses S.R.M v5 and also requires it via package reference when on nca3.x -->
-    <PackageReference Include="System.Reflection.Metadata" Version="5.0.0" />
-  </ItemGroup>
-
-  <ItemGroup Condition="$(TargetFramework.StartsWith('net4'))">
-    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
-  </ItemGroup>
-
 </Project>

@@ -1,120 +1,114 @@
-using System;
-using NLog.Config;
-using NLog.Layouts;
-using NLog.Targets;
-using Sentry.NLog;
+using Sentry.Internal.Extensions;
 
 // ReSharper disable once CheckNamespace
-namespace NLog
+namespace NLog;
+
+/// <summary>
+/// NLog configuration extensions.
+/// </summary>
+[EditorBrowsable(EditorBrowsableState.Never)]
+public static class ConfigurationExtensions
 {
+    // Internal for testability
+    internal const string DefaultTargetName = "sentry";
+
+    internal const string ObsoleteDsnOverload =
+        "The Sentry target no longer initializes the SDK, so a DSN can no longer be supplied to it. " +
+        "Initialize Sentry with SentrySdk.Init (or UseSentry via one of the integrations), and remove 'dsn', " +
+        "'initializeSdk' and any other core SDK settings from the target configuration.";
+
     /// <summary>
-    /// NLog configuration extensions.
+    /// Not supported. The Sentry target no longer initializes the SDK.
     /// </summary>
-    public static class ConfigurationExtensions
+    /// <param name="configuration">The NLog configuration.</param>
+    /// <param name="dsn">No longer supported.</param>
+    /// <param name="optionsConfig">An optional action for configuring the Sentry target options.</param>
+    /// <returns>Never returns.</returns>
+    /// <exception cref="NotSupportedException">Always.</exception>
+    [Obsolete(ObsoleteDsnOverload, error: true)]
+    public static LoggingConfiguration AddSentry(
+        this LoggingConfiguration configuration,
+        string? dsn,
+        Action<SentryNLogOptions>? optionsConfig = null)
+        => throw new NotSupportedException(ObsoleteDsnOverload);
+
+    /// <summary>
+    /// Not supported. The Sentry target no longer initializes the SDK.
+    /// </summary>
+    /// <param name="configuration">The NLog configuration.</param>
+    /// <param name="dsn">No longer supported.</param>
+    /// <param name="targetName">The name to give the new target.</param>
+    /// <param name="optionsConfig">An optional action for configuring the Sentry target options.</param>
+    /// <returns>Never returns.</returns>
+    /// <exception cref="NotSupportedException">Always.</exception>
+    [Obsolete(ObsoleteDsnOverload, error: true)]
+    public static LoggingConfiguration AddSentry(
+        this LoggingConfiguration configuration,
+        string? dsn,
+        string targetName,
+        Action<SentryNLogOptions>? optionsConfig = null)
+        => throw new NotSupportedException(ObsoleteDsnOverload);
+
+    /// <summary>
+    /// Adds a target for Sentry to the NLog configuration.
+    /// </summary>
+    /// <remarks>
+    /// This doesn't initialise Sentry. Initialise Sentry separately, using <c>SentrySdk.Init</c> or another Sentry
+    /// integration (such as ASP.NET Core or MAUI).
+    /// The rule it adds starts at the lowest of the target's minimum levels.
+    /// </remarks>
+    /// <param name="configuration">The NLog configuration.</param>
+    /// <param name="optionsConfig">An optional action for configuring the Sentry target options.</param>
+    /// <param name="targetName">The name to give the new target.</param>
+    /// <returns>The configuration.</returns>
+    public static LoggingConfiguration AddSentry(
+        this LoggingConfiguration configuration,
+        Action<SentryNLogOptions>? optionsConfig = null,
+        string targetName = DefaultTargetName)
     {
-        // Internal for testability
-        internal const string DefaultTargetName = "sentry";
-
-        /// <summary>
-        /// Adds a target for Sentry to the NLog configuration.
-        /// </summary>
-        /// <remarks>
-        /// If DSN is not set, the SDK will look for an environment variable called SENTRY_DSN. If nothing is
-        /// found, SDK is disabled.
-        /// </remarks>
-        /// <param name="configuration">The NLog configuration.</param>
-        /// <param name="optionsConfig">An optional action for configuring the Sentry target options.</param>
-        /// <returns>The configuration.</returns>
-        public static LoggingConfiguration AddSentry(this LoggingConfiguration configuration,
-                                                           Action<SentryNLogOptions>? optionsConfig = null)
+        // Not to throw on code that ignores nullability warnings.
+        if (configuration.IsNull())
         {
-            // Not to throw on code that ignores nullability warnings.
-            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-            if (configuration is null)
-            {
-                return configuration!;
-            }
-
-            return configuration.AddSentry(null, DefaultTargetName, optionsConfig);
+            return configuration!;
         }
 
-        /// <summary>
-        /// Adds a target for Sentry to the NLog configuration.
-        /// </summary>
-        /// <param name="configuration">The NLog configuration.</param>
-        /// <param name="dsn">
-        /// The sentry DSN. If DSN is not set, the SDK will look for an environment variable called SENTRY_DSN.
-        /// If nothing is found, SDK is disabled.
-        /// </param>
-        /// <param name="optionsConfig">An optional action for configuring the Sentry target options.</param>
-        /// <returns>The configuration.</returns>
-        public static LoggingConfiguration AddSentry(this LoggingConfiguration configuration,
-                                                           string? dsn,
-                                                           Action<SentryNLogOptions>? optionsConfig = null)
+        var options = new SentryNLogOptions();
+
+        optionsConfig?.Invoke(options);
+
+        LogManager.Setup().SetupExtensions(e =>
         {
-            // Not to throw on code that ignores nullability warnings.
-            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-            if (configuration is null)
-            {
-                return configuration!;
-            }
+            e.RegisterTarget<SentryTarget>("Sentry");
+            e.RegisterType<SentryNLogOptions>();
+        });
 
-            return configuration.AddSentry(dsn, DefaultTargetName, optionsConfig);
-        }
-
-        /// <summary>
-        /// Adds a target for Sentry to the NLog configuration.
-        /// </summary>
-        /// <param name="configuration">The NLog configuration.</param>
-        /// <param name="dsn">          The sentry DSN.</param>
-        /// <param name="targetName">   The name to give the new target.</param>
-        /// <param name="optionsConfig">An optional action for configuring the Sentry target options.</param>
-        /// <returns>The configuration.</returns>
-        public static LoggingConfiguration AddSentry(this LoggingConfiguration configuration,
-                                                           string? dsn,
-                                                           string targetName,
-                                                           Action<SentryNLogOptions>? optionsConfig = null)
+        var target = new SentryTarget(options)
         {
-            // Not to throw on code that ignores nullability warnings.
-            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-            if (configuration is null)
-            {
-                return configuration!;
-            }
+            Name = targetName,
+            Layout = "${message}",
+        };
 
-            var options = new SentryNLogOptions();
+        configuration.AddTarget(targetName, target);
 
-            optionsConfig?.Invoke(options);
+        configuration.AddRule(LowestMinimumLevel(options), LogLevel.Fatal, targetName);
 
-            Target.Register<SentryTarget>("Sentry");
+        return configuration;
+    }
 
-            var target = new SentryTarget(options)
-            {
-                Name = targetName,
-                Layout = "${message}",
-            };
+    private static LogLevel LowestMinimumLevel(SentryNLogOptions options)
+    {
+        LogLevel?[] levels = [options.MinimumEventLevel, options.MinimumBreadcrumbLevel, options.MinimumLogLevel];
+        return levels.OfType<LogLevel>().DefaultIfEmpty(LogLevel.Off).Min()!;
+    }
 
-            if (dsn != null && string.IsNullOrWhiteSpace(options.Dsn))
-            {
-                options.Dsn = dsn;
-            }
-
-            configuration.AddTarget(targetName, target);
-
-            configuration.AddRuleForAllLevels(targetName);
-
-            return configuration;
-        }
-
-        /// <summary>
-        /// Add any desired additional tags that will be sent with every message.
-        /// </summary>
-        /// <param name="options">The options being configured.</param>
-        /// <param name="name">   The name of the tag.</param>
-        /// <param name="layout"> The layout to be rendered for the tag</param>
-        public static void AddTag(this SentryNLogOptions options, string name, Layout layout)
-        {
-            options.Tags.Add(new TargetPropertyWithContext(name, layout));
-        }
+    /// <summary>
+    /// Add additional tags that will be sent with every message.
+    /// </summary>
+    /// <param name="options">The options being configured.</param>
+    /// <param name="name">The name of the tag.</param>
+    /// <param name="layout">The layout to be rendered for the tag</param>
+    public static void AddTag(this SentryNLogOptions options, string name, Layout layout)
+    {
+        options.Tags.Add(new TargetPropertyWithContext(name, layout));
     }
 }

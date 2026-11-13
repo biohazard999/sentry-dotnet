@@ -1,41 +1,41 @@
-using System;
-using System.Net.Http;
-using System.Threading.Tasks;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
+using Sentry.Samples.AspNetCore.Blazor.Wasm;
 
-namespace Sentry.Samples.AspNetCore.Blazor.Wasm
+try
 {
-    public static class Program
+    var builder = WebAssemblyHostBuilder.CreateDefault(args);
+    builder.UseSentry(options =>
     {
-#pragma warning disable IDE1006 // Naming Styles
-        public static async Task Main(string[] args)
+#if !SENTRY_DSN_DEFINED_IN_ENV
+        // You must specify a DSN. On browser platforms, this should be done in code here.
+        // See https://docs.sentry.io/product/sentry-basics/dsn-explainer/
+        options.Dsn = SamplesShared.Dsn;
+#else
+        // To make things easier for the SDK maintainers we have a custom build target that writes the
+        // SENTRY_DSN environment variable into an EnvironmentVariables class that is available for WASM
+        // targets. This allows us to share one DSN defined in the ENV across desktop and mobile samples.
+        // Generally, you won't want to do this in your own WASM applications - you should set the DSN
+        // in code as above
+        options.Dsn = EnvironmentVariables.Dsn;
+#endif
+        options.Debug = true;
+    });
+
+    builder.RootComponents.Add<App>("#app");
+    builder.RootComponents.Add<HeadOutlet>("head::after");
+    builder.Logging.SetMinimumLevel(LogLevel.Debug);
+
+    builder.Services.AddScoped(_ =>
+        new HttpClient
         {
-            // Capture blazor bootstrapping errors
-            using var sdk = SentrySdk.Init(o =>
-            {
-                o.Dsn = "https://80aed643f81249d4bed3e30687b310ab@o447951.ingest.sentry.io/5428537";
-                o.Debug = true;
-            });
-            try
-            {
-                var builder = WebAssemblyHostBuilder.CreateDefault(args);
-                builder.RootComponents.Add<App>("#app");
-                builder.Logging.SetMinimumLevel(LogLevel.Debug);
-                // Captures logError and higher as events
-                builder.Logging.AddSentry(o => o.InitializeSdk = false);
-
-                builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });
-
-                await builder.Build().RunAsync();
-            }
-            catch (Exception e)
-            {
-                SentrySdk.CaptureException(e);
-                await SentrySdk.FlushAsync(TimeSpan.FromSeconds(2));
-                throw;
-            }
-        }
-    }
+            BaseAddress = new Uri(builder.HostEnvironment.BaseAddress)
+        });
+    await builder.Build().RunAsync();
+}
+catch (Exception e)
+{
+    SentrySdk.CaptureException(e);
+    await SentrySdk.FlushAsync();
+    throw;
 }

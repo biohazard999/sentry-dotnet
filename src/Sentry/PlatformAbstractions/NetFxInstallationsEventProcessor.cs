@@ -1,62 +1,52 @@
-#if NETFX
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
+#if NETFRAMEWORK
 using Sentry.Extensibility;
+using Sentry.Internal;
 
-namespace Sentry.PlatformAbstractions
+namespace Sentry.PlatformAbstractions;
+
+internal class NetFxInstallationsEventProcessor : ISentryEventProcessor, ISdkProcessor
 {
-    internal class NetFxInstallationsEventProcessor : ISentryEventProcessor
+    internal static readonly string NetFxInstallationsKey = ".NET Framework";
+
+    private readonly Lazy<Dictionary<string, string>> _netFxInstallations =
+        new(GetInstallationsDictionary, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private volatile bool _netFxInstallationEnabled = true;
+
+    private readonly SentryOptions _options;
+
+    internal NetFxInstallationsEventProcessor(SentryOptions options) => _options = options;
+
+    private static Dictionary<string, string> GetInstallationsDictionary() =>
+        FrameworkInfo.GetInstallations()
+            .GroupBy(installation => installation.Profile)
+            .ToDictionary(
+                grouping => $"{NetFxInstallationsKey} {grouping.Key}",
+                grouping => string.Join(", ", grouping.Select(i => $"\"{i.GetVersionNumber()}\"").Distinct())
+            );
+
+    public SentryEvent? Process(SentryEvent @event)
     {
-        internal static readonly string NetFxInstallationsKey = ".NET Framework";
-
-        private readonly Lazy<Dictionary<string, string>> _netFxInstallations =
-            new(() => GetInstallationsDictionary(), LazyThreadSafetyMode.ExecutionAndPublication);
-
-        private volatile bool _netFxInstallationEnabled = true;
-
-        private readonly SentryOptions _options;
-
-        internal NetFxInstallationsEventProcessor(SentryOptions options) => _options = options;
-
-        internal static Dictionary<string, string> GetInstallationsDictionary()
+        if (!_netFxInstallationEnabled)
         {
-            var versionsDictionary = new Dictionary<string, string>();
-            var installations = FrameworkInfo.GetInstallations().ToArray();
-            foreach (var profile in installations.Select(p => p.Profile).Distinct())
+            _options.LogDebug("NetFxInstallation disabled due to previous error.");
+        }
+        else if (!@event.Contexts.ContainsKey(NetFxInstallationsKey))
+        {
+            try
             {
-                versionsDictionary.Add($"{NetFxInstallationsKey} {profile}",
-                    string.Join(", ", installations.Where(p => p.Profile == profile)
-                                        .Select(p => $"\"{p.GetVersionNumber()}\"")));
+                @event.Contexts[NetFxInstallationsKey] = _netFxInstallations.Value;
             }
-            return versionsDictionary;
+            catch (Exception ex)
+            {
+                _options.LogError(ex, "Failed to add NetFxInstallations into event.");
+
+                // In case of any failure, this process function will be disabled to avoid throwing exceptions for future events.
+                _netFxInstallationEnabled = false;
+            }
         }
 
-        public SentryEvent? Process(SentryEvent @event)
-        {
-            if (_netFxInstallationEnabled)
-            {
-                if (!@event.Contexts.ContainsKey(NetFxInstallationsKey))
-                {
-                    try
-                    {
-                        @event.Contexts[NetFxInstallationsKey] = _netFxInstallations.Value;
-                    }
-                    catch (Exception ex)
-                    {
-                        _options.DiagnosticLogger?.LogError("Failed to add NetFxInstallations into event.", ex);
-                        //In case of any failure, this process function will be disabled to avoid throwing exceptions for future events.
-                        _netFxInstallationEnabled = false;
-                    }
-                }
-            }
-            else
-            {
-                _options.DiagnosticLogger.LogDebug("NetFxInstallation disabled due to previous error.");
-            }
-            return @event;
-        }
+        return @event;
     }
 }
 #endif

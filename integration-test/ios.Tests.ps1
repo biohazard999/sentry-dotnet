@@ -1,0 +1,158 @@
+# This file contains test cases for https://pester.dev/
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. $PSScriptRoot/pester.ps1
+. $PSScriptRoot/../scripts/device-test-utils.ps1
+
+BeforeDiscovery {
+    # Skip iOS integration tests unless a simulator has already been booted by
+    # iOS Device Tests, or manually when testing locally. This avoids slowing
+    # down the macOS build job further.
+    $script:simulator = Get-IosSimulatorUdid -PreferredStates @('Booted')
+}
+
+Describe 'iOS app (<tfm>, <configuration>, <runtime>)' -ForEach @(
+    # Note: only the latest iOS TFM is covered. Each github runner only has Xcode
+    # versions to test a single version of .NET.
+    # See https://github.com/dotnet/macios/issues/24199#issuecomment-3819021247
+    #
+    # CoreCLR only: as of .NET 11 preview 6 it is the only runtime for MAUI mobile apps and the
+    # UseMonoRuntime property was removed. Mono on iOS is therefore covered only by net10.0, which
+    # this job can't build alongside net11.0 because of the Xcode pinning noted above. See
+    # https://devblogs.microsoft.com/dotnet/coreclr-progress-and-mono-timeline-dotnet-maui/
+    @{ tfm = "net11.0-ios"; configuration = "Release"; runtime = "coreclr" }
+    @{ tfm = "net11.0-ios"; configuration = "Debug";   runtime = "coreclr" }
+) -Skip:(-not $script:simulator) {
+    BeforeAll {
+        . $PSScriptRoot/../scripts/device-test-utils.ps1
+
+        Remove-Item -Path "$PSScriptRoot/mobile-app" -Recurse -Force -ErrorAction SilentlyContinue
+        # Note: maui-device, not maui-app. cli.Tests.ps1 generates a fresh app from the
+        # MAUI template at integration-test/maui-app and deletes whatever is there first, so
+        # this source app must not share that name.
+        Copy-Item -Path "$PSScriptRoot/maui-device" -Destination "$PSScriptRoot/mobile-app" -Recurse -Force
+        # clean up potential old copied build outputs that may target a different configuration or runtime
+        Remove-Item -Path "$PSScriptRoot/mobile-app/bin", "$PSScriptRoot/mobile-app/obj" `
+            -Recurse -Force -ErrorAction SilentlyContinue
+        Push-Location $PSScriptRoot/mobile-app
+
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLower()
+        $rid = "iossimulator-$arch"
+
+        Write-Host "::group::Build Sentry.Maui.Device.IntegrationTestApp.csproj"
+        $useMonoRuntime = if ($runtime -eq 'mono') { 'true' } else { 'false' }
+        dotnet build Sentry.Maui.Device.IntegrationTestApp.csproj `
+            --configuration $configuration `
+            --framework $tfm `
+            --runtime $rid `
+            -p:UseMonoRuntime=$useMonoRuntime
+        | ForEach-Object { Write-Host $_ }
+        Write-Host '::endgroup::'
+        $LASTEXITCODE | Should -Be 0
+
+        function InstallIosApp
+        {
+            Write-Host "::group::Install bin/$configuration/$tfm/$rid/Sentry.Maui.Device.IntegrationTestApp.app"
+            xcrun simctl install $simulator `
+                bin/$configuration/$tfm/$rid/Sentry.Maui.Device.IntegrationTestApp.app
+            | ForEach-Object { Write-Host $_ }
+            Write-Host '::endgroup::'
+            $LASTEXITCODE | Should -Be 0
+        }
+
+        function UninstallIosApp
+        {
+            Write-Host "::group::Uninstall io.sentry.dotnet.maui.device.integrationtestapp"
+            xcrun simctl uninstall $simulator `
+                io.sentry.dotnet.maui.device.integrationtestapp
+            | ForEach-Object { Write-Host $_ }
+            Write-Host '::endgroup::'
+            $LASTEXITCODE | Should -Be 0
+        }
+
+        function RunIosApp
+        {
+            param(
+                [string] $Dsn,
+                [string] $TestArg = 'None'
+            )
+            $Dsn = $Dsn.Replace('http://', 'http://key@') + '/0'
+            Write-Host "::group::Run iOS app (TestArg=$TestArg)"
+            xcrun simctl spawn $simulator launchctl setenv SENTRY_DSN $Dsn
+            xcrun simctl spawn $simulator launchctl setenv SENTRY_TEST_ARG $TestArg
+            xcrun simctl launch `
+                --console `
+                --terminate-running-process `
+                $simulator `
+                io.sentry.dotnet.maui.device.integrationtestapp
+            | ForEach-Object { Write-Host $_ }
+            Write-Host '::endgroup::'
+            $LASTEXITCODE | Should -Be 0
+        }
+    }
+
+    AfterAll {
+        Pop-Location
+    }
+
+    BeforeEach {
+        InstallIosApp
+    }
+
+    AfterEach {
+        UninstallIosApp
+    }
+
+    It 'captures managed crash (<configuration>, <runtime>)' {
+        $result = Invoke-SentryServer {
+            param([string]$url)
+            RunIosApp -Dsn $url -TestArg "Managed"
+            RunIosApp -Dsn $url
+        }
+
+        $result.HasErrors() | Should -BeFalse
+        $result.Envelopes() | Should -AnyElementMatch "`"type`":`"System.ApplicationException`""
+        $result.Envelopes() | Should -Not -AnyElementMatch "`"type`":`"(EXC_[A-Z_]+|SIG[A-Z]+)`""
+        $result.Envelopes() | Should -HaveCount 1
+    }
+
+    It 'does not leak managed exception as NSException (<configuration>, <runtime>)' {
+        $result = Invoke-SentryServer {
+            param([string]$url)
+            RunIosApp -Dsn $url -TestArg "OnActivated"
+            RunIosApp -Dsn $url
+        }
+
+        $result.HasErrors() | Should -BeFalse
+        $result.Envelopes() | Should -AnyElementMatch "`"type`":`"System.ApplicationException`""
+        $result.Envelopes() | Should -Not -AnyElementMatch "`"type`":`"nsexception`""
+        $result.Envelopes() | Should -AnyElementMatch "`"in_foreground`":true"
+        $result.Envelopes() | Should -HaveCount 1
+    }
+
+    It 'captures native crash (<configuration>, <runtime>)' {
+        $result = Invoke-SentryServer {
+            param([string]$url)
+            RunIosApp -Dsn $url -TestArg "Native"
+            RunIosApp -Dsn $url
+        }
+
+        $result.HasErrors() | Should -BeFalse
+        $result.Envelopes() | Should -AnyElementMatch "`"type`":`"(EXC_[A-Z_]+|SIG[A-Z]+)`""
+        $result.Envelopes() | Should -Not -AnyElementMatch "`"type`":`"System.\w+Exception`""
+        $result.Envelopes() | Should -HaveCount 1
+    }
+
+    It 'captures null reference exception (<configuration>, <runtime>)' {
+        $result = Invoke-SentryServer {
+            param([string]$url)
+            RunIosApp -Dsn $url -TestArg "NullReferenceException"
+            RunIosApp -Dsn $url
+        }
+
+        $result.HasErrors() | Should -BeFalse
+        $result.Envelopes() | Should -AnyElementMatch "`"type`":`"System.NullReferenceException`""
+        $result.Envelopes() | Should -Not -AnyElementMatch "`"type`":`"(EXC_[A-Z_]+|SIG[A-Z]+)`""
+        $result.Envelopes() | Should -HaveCount 1
+    }
+}

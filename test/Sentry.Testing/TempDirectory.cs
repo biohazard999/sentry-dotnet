@@ -1,31 +1,20 @@
-using System;
-using System.IO;
+namespace Sentry.Testing;
 
-namespace Sentry.Testing
+public class TempDirectory : IDisposable
 {
-    public class TempDirectory : IDisposable
+    public string Path { get; }
+
+    public TempDirectory(string path = default)
     {
-        public string Path { get; }
+        Path = path ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(Path);
+    }
 
-        public TempDirectory(string path)
+    public void Dispose()
+    {
+        if (Directory.Exists(Path))
         {
-            Path = path;
-            Directory.CreateDirectory(path);
-        }
-
-        public TempDirectory()
-            : this(System.IO.Path.Combine(Directory.GetCurrentDirectory(), Guid.NewGuid().ToString()))
-        { }
-
-        public void Dispose()
-        {
-            try
-            {
-                Directory.Delete(Path, true);
-            }
-            catch (DirectoryNotFoundException)
-            {
-            }
+            Directory.Delete(Path, true);
         }
     }
 }

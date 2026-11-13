@@ -1,0 +1,119 @@
+#nullable enable
+
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace Sentry.AspNetCore.Tests;
+
+public class SentryAspNetCoreStructuredLoggerProviderTests : IDisposable
+{
+    private class Fixture
+    {
+        public IHub Hub { get; }
+        public MockClock Clock { get; }
+
+        public Fixture()
+        {
+            Hub = Substitute.For<IHub>();
+            SentryClientExtensions.SentryOptionsForTestingOnly = new SentryAspNetCoreOptions { EnableLogs = true };
+            Clock = new MockClock();
+
+            Hub.IsEnabled.Returns(true);
+        }
+
+        public SentryAspNetCoreStructuredLoggerProvider GetSut()
+        {
+            return new SentryAspNetCoreStructuredLoggerProvider(Hub, Clock);
+        }
+    }
+
+    private readonly Fixture _fixture = new();
+
+    public void Dispose() => SentryClientExtensions.SentryOptionsForTestingOnly = null;
+
+    [Fact]
+    public void Type_CustomAttributes_HasProviderAliasAttribute()
+    {
+        var type = typeof(SentryAspNetCoreStructuredLoggerProvider);
+
+        type.GetCustomAttributes<ProviderAliasAttribute>().Should()
+            .ContainSingle().Which
+            .Alias.Should().Be("Sentry");
+    }
+
+    [Fact]
+    public void Ctor_DependencyInjection_CanCreate()
+    {
+        using var services = new ServiceCollection()
+            .AddLogging()
+            .AddSingleton<ILoggerProvider, SentryAspNetCoreStructuredLoggerProvider>()
+            .AddSingleton(_fixture.Hub)
+            .BuildServiceProvider();
+
+        var logger = services.GetRequiredService<ILogger<SentryAspNetCoreStructuredLoggerProviderTests>>();
+
+        logger.Should().BeOfType<Logger<SentryAspNetCoreStructuredLoggerProviderTests>>();
+    }
+
+    [Fact]
+    public void CreateLogger_OfType()
+    {
+        var provider = _fixture.GetSut();
+
+        var logger = provider.CreateLogger("CategoryName");
+
+        logger.Should().BeOfType<Sentry.Extensions.Logging.SentryStructuredLogger>();
+    }
+
+    [Fact]
+    public void CreateLogger_DefaultOptions_IsNotEnabled()
+    {
+        using var hub = new Hub(new SentryAspNetCoreOptions { Dsn = ValidDsn }, Substitute.For<ISentryClient>());
+        var provider = new SentryAspNetCoreStructuredLoggerProvider(hub);
+
+        var logger = provider.CreateLogger("CategoryName");
+
+        logger.IsEnabled(LogLevel.Critical).Should().BeFalse();
+    }
+
+    [Fact]
+    public void CreateLogger_DependencyInjection_CanLog()
+    {
+        SentryLog? capturedLog = null;
+        _fixture.Hub.Logger.Returns(Substitute.For<SentryStructuredLogger>());
+        _fixture.Hub.Logger.CaptureLog(Arg.Do<SentryLog>(log => capturedLog = log));
+
+        using var services = new ServiceCollection()
+            .AddLogging()
+            .AddSingleton<ILoggerProvider, SentryAspNetCoreStructuredLoggerProvider>()
+            .AddSingleton(_fixture.Hub)
+            .BuildServiceProvider();
+
+        var logger = services.GetRequiredService<ILogger<SentryAspNetCoreStructuredLoggerProviderTests>>();
+        logger.LogInformation("message");
+
+        Assert.NotNull(capturedLog);
+        capturedLog.TryGetAttribute("category.name", out object? categoryName).Should().BeTrue();
+        categoryName.Should().Be(typeof(SentryAspNetCoreStructuredLoggerProviderTests).FullName);
+
+        capturedLog.TryGetAttribute("sentry.sdk.name", out object? name).Should().BeTrue();
+        name.Should().Be(Constants.SdkName);
+
+        capturedLog.TryGetAttribute("sentry.sdk.version", out object? version).Should().BeTrue();
+        version.Should().Be(SentryMiddleware.NameAndVersion.Version);
+
+        capturedLog.TryGetAttribute("sentry.origin", out object? origin).Should().BeTrue();
+        origin.Should().Be("auto.log.extensions_logging");
+    }
+
+    [Fact]
+    public void Dispose_NoOp()
+    {
+        var provider = _fixture.GetSut();
+
+        provider.Dispose();
+
+        provider.Dispose();
+    }
+}
